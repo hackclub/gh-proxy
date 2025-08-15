@@ -23,12 +23,13 @@ Build with the provided `Dockerfile`. Deploy on Coolify as a single container wi
 Send requests through the proxy with your admin-created API key:
 
 ```
-curl -H "X-API-Key: zrl_dev_shinx_xxx" "http://localhost:8080/proxy/repos/zachlatta/sshtron"
+curl -H "X-API-Key: YOUR_KEY" "http://localhost:8080/gh/repos/zachlatta/sshtron"
 ```
 
 GraphQL:
 
 ```
-curl -H "X-API-Key: zrl_dev_shinx_xxx" -H "Content-Type: application/json" -d '{"query":"{ viewer { login } }"}' http://localhost:8080/graphql
+curl -H "X-API-Key: YOUR_KEY" -H "Content-Type: application/json" -d '{"query":"{ viewer { login } }"}' http://localhost:8080/gh/graphql
 ```
 
+Note: `/gh/...` is the REST proxy prefix and `/gh/graphql` proxies GraphQL.

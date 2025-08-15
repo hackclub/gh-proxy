@@ -72,8 +72,8 @@ func New(pool *pgxpool.Pool, cfg config.Config) *Server {
 	ar.HandleFunc("/keys_usage.json", s.handleAdminKeysUsageJSON).Methods("GET")
 	ar.HandleFunc("/recent.json", s.handleAdminRecentJSON).Methods("GET")
 
-	r.HandleFunc("/proxy/{rest:.*}", s.handleProxyREST)
-	r.HandleFunc("/graphql", s.handleProxyGraphQL)
+	r.HandleFunc("/gh/{rest:.*}", s.handleProxyREST)
+	r.HandleFunc("/gh/graphql", s.handleProxyGraphQL)
 
 	s.Router = r
 	return s
