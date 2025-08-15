@@ -1,0 +1,16 @@
+# dotenv
+.env
+
+# editor
+*.swp
+.DS_Store
+
+# build artifacts
+bin/
+
+# local tmp data
+/tmp/
+access_tokens.csv
+
+# node or web build (future)
+node_modules/

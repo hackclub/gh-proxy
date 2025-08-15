@@ -1,0 +1,35 @@
+version: "3.9"
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ghproxy
+      POSTGRES_PASSWORD: ghproxy
+      POSTGRES_DB: ghproxy
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    environment:
+      - DATABASE_URL=postgres://ghproxy:ghproxy@db:5432/ghproxy?sslmode=disable
+      - GITHUB_OAUTH_CLIENT_ID=${GITHUB_OAUTH_CLIENT_ID}
+      - GITHUB_OAUTH_CLIENT_SECRET=${GITHUB_OAUTH_CLIENT_SECRET}
+      - BASE_URL=http://localhost:8080
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASS=${ADMIN_PASS:-admin}
+      - MAX_CACHE_TIME=${MAX_CACHE_TIME:-300}
+      - MAX_CACHE_SIZE_MB=${MAX_CACHE_SIZE_MB:-100}
+    depends_on:
+      - db
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
+      - gocache:/go
+volumes:
+  pgdata:
+  gocache:

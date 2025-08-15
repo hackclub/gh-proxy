@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Donate your GitHub token</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="icon" href="/icon.png" type="image/png">
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/icon.png">
+    <style>
+      body { font-family: -apple-system, system-ui, sans-serif; margin: 2rem; display: flex; justify-content: center; }
+      .donate-container { max-width: 720px; width: 100%; }
+      h1 { font-size: 2rem; margin-bottom: 1rem; }
+      .stats-box { background: #f7f7f8; border: 1px solid #eee; border-radius: 12px; padding: 1rem; margin: 1rem 0; }
+      .donate-button { background: #111; color: #fff; border: none; padding: 0.8rem 1.2rem; border-radius: 8px; font-weight: 600; cursor: pointer; }
+      .donate-button:hover { opacity: 0.95; }
+    </style>
+  </head>
+
+  <body>
+    <div class="donate-container">
+  <h1>Donate your GitHub token</h1>
+
+  <div class="stats-box">
+    <p><strong>{{.Donors}} Hack Clubbers</strong> have donated GitHub tokens so far.</p>
+      {{if .LastUser}}
+      <p>The most recent person to donate was <a href="{{.LastURL}}"><strong>@{{.LastUser}}</strong></a>{{if .LastAgo}} ({{.LastAgo}}).{{end}}</p>
+      {{end}}
+  </div>
+
+  <p>I'm working on a project to see if people coded more on average during High Seas / Arcade than before.</p>
+
+  <p>By clicking "Donate Token", you will be prompted to log in with GitHub. It'll only ask for public permissions and won't give any private access to your account or give edit access to anything (it's read-only).</p>
+
+  <p>It'll just help the project make more API requests to GitHub faster (because my personal access token is getting rate limited).</p>
+
+  <p>Thank you!</p>
+
+  <p>- Zach</p>
+
+  <form data-turbo="false" action="/auth/github" accept-charset="UTF-8" method="post">
+    <button type="submit" class="donate-button">Donate Token</button>
+  </form></div> 
+  </body>
+</html>
