@@ -32,7 +32,7 @@
   </form>
 
   <table>
-    <thead><tr><th>Key</th><th>Total requests</th><th>Cache hit rate</th><th>Last used</th><th>Daily (7d)</th><th>Actions</th></tr></thead>
+    <thead><tr><th>Name</th><th>Preview</th><th>Total requests</th><th>Cache hit rate</th><th>Last used</th><th>Daily (7d)</th><th>Actions</th></tr></thead>
     <tbody id="apikeys"></tbody>
   </table>
 
@@ -86,8 +86,9 @@ async function refreshAPIKeys(){
   tbody.innerHTML = '';
   for (const k of data) {
     const tr = document.createElement('tr');
-    const series = (usage[k.key]||[]).map(p=>p.c);
-    tr.innerHTML = `<td>${k.key}</td><td>${k.total}</td><td>${k.hit_rate.toFixed ? k.hit_rate.toFixed(1)+'%' : k.hit_rate}</td><td>${k.last_used||''}</td><td>${sparkline(series)}</td><td>${k.disabled?'disabled':`<form method='post' action='/admin/apikeys/${k.key}/disable'><button>Disable</button></form>`}</td>`;
+    const name = `${k.hc}_${k.app}_${k.machine}`;
+    const series = (usage[name]||[]).map(p=>p.c);
+    tr.innerHTML = `<td>${name}</td><td>${k.prefix}…</td><td>${k.total}</td><td>${k.hit_rate.toFixed ? k.hit_rate.toFixed(1)+'%' : k.hit_rate}</td><td>${k.last_used||''}</td><td>${sparkline(series)}</td><td>${k.disabled?'disabled':`<form method='post' action='/admin/apikeys/${k.id}/disable'><button>Disable</button></form>`}</td>`;
     tbody.appendChild(tr);
   }
 }

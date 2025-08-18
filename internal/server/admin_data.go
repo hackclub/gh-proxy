@@ -9,18 +9,36 @@ import (
 // Expose API keys and usage for admin UI
 func (s *Server) handleAdminKeysJSON(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.pool.Query(r.Context(), `
-SELECT k.key,
-       COALESCE((SELECT count(*) FROM request_logs rl WHERE rl.api_key=k.key),0) AS total,
-       COALESCE((SELECT AVG(CASE WHEN rl.cache_hit THEN 1 ELSE 0 END) * 100 FROM request_logs rl WHERE rl.api_key=k.key),0) AS hit_rate,
+SELECT k.id::text,
+       k.hc_username,
+       k.app_name,
+       k.machine,
+       k.key_prefix,
+       COALESCE((SELECT count(*) FROM request_logs rl WHERE rl.api_key=k.key_hash),0) AS total,
+       COALESCE((SELECT AVG(CASE WHEN rl.cache_hit THEN 1 ELSE 0 END) * 100 FROM request_logs rl WHERE rl.api_key=k.key_hash),0) AS hit_rate,
        k.last_used_at,
        k.disabled
 FROM api_keys k
 ORDER BY k.created_at DESC`)
 	if err != nil { http.Error(w, err.Error(), 500); return }
 	defer rows.Close()
-	type row struct { Key string `json:"key"`; Total int64 `json:"total"`; HitRate float64 `json:"hit_rate"`; LastUsed *time.Time `json:"last_used"`; Disabled bool `json:"disabled"` }
+	type row struct {
+		ID string `json:"id"`
+		HC string `json:"hc"`
+		App string `json:"app"`
+		Machine string `json:"machine"`
+		Prefix string `json:"prefix"`
+		Total int64 `json:"total"`
+		HitRate float64 `json:"hit_rate"`
+		LastUsed *time.Time `json:"last_used"`
+		Disabled bool `json:"disabled"`
+	}
 	var out []row
-	for rows.Next() { var rr row; if err := rows.Scan(&rr.Key, &rr.Total, &rr.HitRate, &rr.LastUsed, &rr.Disabled); err!=nil { http.Error(w, err.Error(), 500); return }; out = append(out, rr) }
+	for rows.Next() {
+		var rr row
+		if err := rows.Scan(&rr.ID, &rr.HC, &rr.App, &rr.Machine, &rr.Prefix, &rr.Total, &rr.HitRate, &rr.LastUsed, &rr.Disabled); err!=nil { http.Error(w, err.Error(), 500); return }
+		out = append(out, rr)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }

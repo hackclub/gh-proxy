@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
+	"crypto/sha256"
 	"fmt"
 	"html/template"
 	"io"
@@ -67,7 +69,7 @@ func New(pool *pgxpool.Pool, cfg config.Config) *Server {
 	ar.HandleFunc("", s.handleAdmin).Methods("GET")
 	ar.HandleFunc("/ws", s.handleAdminWS)
 	ar.HandleFunc("/apikeys", s.handleAPIKeys).Methods("POST")
-	ar.HandleFunc("/apikeys/{key}/disable", s.handleDisableAPIKey).Methods("POST")
+	ar.HandleFunc("/apikeys/{id}/disable", s.handleDisableAPIKey).Methods("POST")
 	ar.HandleFunc("/keys.json", s.handleAdminKeysJSON).Methods("GET")
 	ar.HandleFunc("/keys_usage.json", s.handleAdminKeysUsageJSON).Methods("GET")
 	ar.HandleFunc("/recent.json", s.handleAdminRecentJSON).Methods("GET")
@@ -156,17 +158,20 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 	prefix := fmt.Sprintf("%s_%s_%s_", hc, app, machine)
 	suffix := randString(24)
 	key := prefix + suffix
-	_, err := s.pool.Exec(r.Context(), `INSERT INTO api_keys(key,hc_username,app_name,machine,rate_limit_per_sec) VALUES($1,$2,$3,$4,$5)`, key, hc, app, machine, per)
+	keyHash := sha256Hex(key)
+	_, err := s.pool.Exec(r.Context(), `INSERT INTO api_keys(key_hash,key_prefix,hc_username,app_name,machine,rate_limit_per_sec) VALUES($1,$2,$3,$4,$5,$6)`, keyHash, key[:5], hc, app, machine, per)
 	if err != nil { http.Error(w, err.Error(), 500); return }
 	log.Printf("created api key for %s/%s on %s: %s", hc, app, machine, maskKey(key))
-	http.Redirect(w, r, "/admin", http.StatusSeeOther)
+	// Show the key once to the admin immediately
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, "<html><body><p>Created key for %s/%s on %s.</p><p><strong>Copy now, you won't see it again:</strong></p><pre>%s</pre><p><a href=\"/admin\">Back to admin</a></p></body></html>", hc, app, machine, key)
 }
 
 func (s *Server) handleDisableAPIKey(w http.ResponseWriter, r *http.Request) {
-	key := mux.Vars(r)["key"]
-	_, err := s.pool.Exec(r.Context(), `UPDATE api_keys SET disabled=true WHERE key=$1`, key)
+	id := mux.Vars(r)["id"]
+	_, err := s.pool.Exec(r.Context(), `UPDATE api_keys SET disabled=true WHERE id::text=$1`, id)
 	if err != nil { http.Error(w, err.Error(), 500); return }
-	log.Printf("disabled api key %s", maskKey(key))
+	log.Printf("disabled api key id=%s", id)
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
@@ -184,9 +189,10 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 	// rate limit and disabled check
 	var disabled bool
 	var perSec int
-	_ = s.pool.QueryRow(r.Context(), `SELECT disabled, rate_limit_per_sec FROM api_keys WHERE key=$1`, apiKey).Scan(&disabled, &perSec)
+	apiKeyHash := sha256Hex(apiKey)
+	_ = s.pool.QueryRow(r.Context(), `SELECT disabled, rate_limit_per_sec FROM api_keys WHERE key_hash=$1`, apiKeyHash).Scan(&disabled, &perSec)
 	if disabled { log.Printf("deny disabled key: %s", maskKey(apiKey)); http.Error(w, "api key disabled", 403); return }
-	if !s.ratelimit.Allow(apiKey, perSec) { log.Printf("429 rate limit for key %s", maskKey(apiKey)); http.Error(w, "rate limit exceeded", 429); return }
+	if !s.ratelimit.Allow(apiKeyHash, perSec) { log.Printf("429 rate limit for key %s", maskKey(apiKey)); http.Error(w, "rate limit exceeded", 429); return }
 
 	body, _ := io.ReadAll(r.Body)
 	defer r.Body.Close()
@@ -231,9 +237,9 @@ func (s *Server) afterRequest(ctx context.Context, apiKey, method, path string, 
 	s.hub.broadcastStat(s.stats())
 }
 
-func (s *Server) logRequest(ctx context.Context, apiKey, method, path string, status int, hit bool) {
-	_, _ = s.pool.Exec(ctx, `INSERT INTO request_logs(api_key,method,path,status,cache_hit) VALUES($1,$2,$3,$4,$5)`, apiKey, method, path, status, hit)
-	_, _ = s.pool.Exec(ctx, `UPDATE api_keys SET last_used_at=now() WHERE key=$1`, apiKey)
+func (s *Server) logRequest(ctx context.Context, apiKeyHash, method, path string, status int, hit bool) {
+	_, _ = s.pool.Exec(ctx, `INSERT INTO request_logs(api_key,method,path,status,cache_hit) VALUES($1,$2,$3,$4,$5)`, apiKeyHash, method, path, status, hit)
+	_, _ = s.pool.Exec(ctx, `UPDATE api_keys SET last_used_at=now() WHERE key_hash=$1`, apiKeyHash)
 }
 
 // prune request_logs to keep only latest N rows periodically (avoid doing it on hot path)
@@ -303,6 +309,11 @@ func isHopByHop(h string) bool {
 }
 
 func parseAPIKey(v string) string { return strings.TrimSpace(v) }
+
+func sha256Hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
 
 func maskKey(k string) string {
 	k = strings.TrimSpace(k)
