@@ -1,8 +1,0 @@
-2025/08/25 13:03:12 listening on :8080
-2025/08/25 13:03:18 GET /docs 200 (0s) ua="curl/8.4.0" key=***
-2025/08/25 13:03:23 GET / 200 (4ms) ua="curl/8.4.0" key=***
-2025/08/25 13:03:25 created api key for zrl/testtest on test: zrl_te…5zxx
-2025/08/25 13:03:25 POST /admin/apikeys 200 (17ms) ua="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36" key=***
-2025/08/25 13:03:29 GET /admin 200 (8ms) ua="curl/8.4.0" key=***
-2025/08/25 13:03:34 GET /docs 200 (0s) ua="curl/8.4.0" key=***
-2025/08/25 13:03:44 GET /docs 200 (0s) ua="curl/8.4.0" key=***

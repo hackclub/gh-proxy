@@ -12,5 +12,9 @@ bin/
 /tmp/
 access_tokens.csv
 
+# logs
+server.log
+*.log
+
 # node or web build (future)
 node_modules/
