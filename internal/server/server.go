@@ -458,9 +458,13 @@ func (l *loggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, errors.New("hijack not supported")
 }
 
-// simple in-memory token bucket per API key
+// sharded in-memory token bucket per API key for better concurrency
 type rateLimiter struct {
-	mu sync.Mutex
+	shards []*rateLimiterShard
+}
+
+type rateLimiterShard struct {
+	mu sync.RWMutex
 	buckets map[string]*bucket
 }
 
@@ -470,14 +474,30 @@ type bucket struct {
 	last time.Time
 }
 
-func newRateLimiter() *rateLimiter { return &rateLimiter{buckets: make(map[string]*bucket)} }
+func newRateLimiter() *rateLimiter {
+	// Create 16 shards to reduce lock contention
+	shards := make([]*rateLimiterShard, 16)
+	for i := range shards {
+		shards[i] = &rateLimiterShard{buckets: make(map[string]*bucket)}
+	}
+	return &rateLimiter{shards: shards}
+}
 
 func (rl *rateLimiter) Allow(key string, perSec int) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
 	if perSec <= 0 { return false } // do not create buckets for invalid/disabled keys
-	b := rl.buckets[key]
-	if b == nil { b = &bucket{capacity: perSec, tokens: float64(perSec), last: time.Now()}; rl.buckets[key] = b }
+	
+	// Shard by key hash to reduce lock contention
+	hash := 0
+	for _, c := range key {
+		hash = hash*31 + int(c)
+	}
+	shard := rl.shards[hash&15] // 16 shards
+	
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	
+	b := shard.buckets[key]
+	if b == nil { b = &bucket{capacity: perSec, tokens: float64(perSec), last: time.Now()}; shard.buckets[key] = b }
 	// refill
 	now := time.Now()
 	dt := now.Sub(b.last).Seconds()

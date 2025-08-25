@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"strings"
 	"log"
-	"os"
-	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"gh-proxy/internal/config"
 )
 
 //go:embed migrations/*.sql
@@ -19,12 +20,17 @@ var migrationsFS embed.FS
 func Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil { return nil, err }
-	// allow tuning via env DB_MAX_CONNS; pgxpool supports MaxConns on config
-	if maxStr := os.Getenv("DB_MAX_CONNS"); maxStr != "" {
-		if v, err := strconv.ParseInt(maxStr, 10, 32); err == nil && v > 0 {
-			cfg.MaxConns = int32(v)
-		}
-	}
+	
+	// Load config for performance tuning
+	appCfg := config.Load()
+	
+	// Configure connection pool for high performance
+	cfg.MaxConns = appCfg.DBMaxConns
+	cfg.MinConns = appCfg.DBMaxIdleConns
+	cfg.MaxConnLifetime = time.Duration(appCfg.DBConnMaxLifetime) * time.Second
+	cfg.MaxConnIdleTime = 10 * time.Minute
+	cfg.HealthCheckPeriod = 1 * time.Minute
+	
 	return pgxpool.NewWithConfig(ctx, cfg)
 }
 

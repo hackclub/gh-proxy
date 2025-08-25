@@ -32,10 +32,11 @@ func main() {
 	httpServer := &http.Server{
 		Addr:              ":8080",
 		Handler:           srv.Router,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,   // Faster header reading
+		ReadTimeout:       15 * time.Second,  // Faster read timeout
+		WriteTimeout:      30 * time.Second,  // Faster write timeout
+		IdleTimeout:       60 * time.Second,  // Shorter idle timeout
+		MaxHeaderBytes:    64 << 10,          // 64KB max headers
 	}
 
 	go func() {

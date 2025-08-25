@@ -21,7 +21,22 @@ type Client struct {
 }
 
 func New(pool *pgxpool.Pool) *Client {
-	return &Client{pool: pool, http: &http.Client{Timeout: 30 * time.Second}}
+	// Optimized HTTP client for high throughput
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 5 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+	}
+	
+	return &Client{
+		pool: pool, 
+		http: &http.Client{
+			Timeout: 15 * time.Second, // Faster timeout for high throughput
+			Transport: transport,
+		},
+	}
 }
 
 type rateLimits struct {
