@@ -22,16 +22,25 @@ go build -o ./bin/server ./cmd/server
 ./bin/server &
 ```
 
-#### 2. Production Mode
+#### 2. Production Mode ⭐ RECOMMENDED
 ```bash
-# Background with logs to file only
-./bin/server > server.log 2>&1 &
+# Production: Let logs go to stdout/stderr (DO THIS)
+./bin/server
 
-# Background with logs to BOTH terminal and file
+# The application logs naturally to stderr, which is perfect for:
+# - Docker: docker logs container-name
+# - Kubernetes: kubectl logs pod-name  
+# - systemd: journalctl -u service-name
+# - Process managers: PM2, supervisor handle log aggregation
+```
+
+#### 3. Legacy/Development File Logging (NOT recommended for production)
+```bash
+# Only use for local development if you need persistent files
 ./bin/server 2>&1 | tee server.log &
 ```
 
-#### 3. Docker Development
+#### 4. Docker Development
 ```bash
 # Using docker-compose (logs to stdout/docker logs)
 docker-compose up app
@@ -76,6 +85,76 @@ grep "ERROR" server.log
 - **Admin Panel**: http://localhost:8080/admin (admin:admin)
 - **GitHub Proxy**: http://localhost:8080/gh/*
 
+### 🚀 Production Deployment
+
+The application is designed for modern deployment patterns where logs go to stdout/stderr:
+
+#### Docker
+```dockerfile
+# Dockerfile example
+FROM golang:1.21-alpine AS builder
+WORKDIR /app
+COPY . .
+RUN go build -o server ./cmd/server
+
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates
+WORKDIR /root/
+COPY --from=builder /app/server .
+CMD ["./server"]  # Logs naturally go to stdout
+```
+
+```bash
+# View logs
+docker logs container-name
+docker logs -f container-name  # follow
+```
+
+#### systemd Service
+```ini
+# /etc/systemd/system/gh-proxy.service
+[Unit]
+Description=GitHub Proxy Service
+After=network.target
+
+[Service]
+Type=simple
+User=ghproxy
+WorkingDirectory=/opt/gh-proxy
+ExecStart=/opt/gh-proxy/server
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+# View logs
+journalctl -u gh-proxy
+journalctl -u gh-proxy -f  # follow
+```
+
+#### Kubernetes
+```yaml
+# deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gh-proxy
+spec:
+  containers:
+  - name: gh-proxy
+    image: gh-proxy:latest
+    # Logs automatically captured by Kubernetes
+```
+
+```bash
+# View logs  
+kubectl logs deployment/gh-proxy
+kubectl logs -f deployment/gh-proxy  # follow
+```
+
 ### 🔧 Configuration
 
 The server uses environment variables (or `.env` file):
@@ -96,7 +175,7 @@ MAX_PROXY_BODY_BYTES=1048576
 
 - **Real-time logs**: Use `./bin/server` (foreground) for active development
 - **Background development**: Use `./bin/server &` to free up terminal  
-- **Production testing**: Use `./bin/server 2>&1 | tee server.log &` for persistent logs
+- **Production**: Use `./bin/server` (logs to stdout, no files needed)
 - **Database**: Run `docker-compose up -d db` to start PostgreSQL
 - **Hot reload**: Use tools like `air` for auto-restart on changes
 
