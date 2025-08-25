@@ -16,5 +16,21 @@ access_tokens.csv
 server.log
 *.log
 
+# secrets and credentials (extra protection)
+.env.local
+.env.production
+.env.*.local
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*.crt
+.secrets/
+secrets.txt
+credentials.json
+service-account.json
+
 # node or web build (future)
 node_modules/
