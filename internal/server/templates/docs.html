@@ -1,0 +1,182 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>gh-proxy API Documentation</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; margin: 2rem auto; max-width: 800px; line-height: 1.6; }
+    h1 { color: #333; border-bottom: 2px solid #eee; padding-bottom: 0.5rem; }
+    h2 { color: #555; margin-top: 2rem; }
+    h3 { color: #666; }
+    code { background: #f5f5f5; padding: 2px 4px; border-radius: 3px; font-family: 'Monaco', 'Menlo', monospace; }
+    pre { background: #f8f8f8; padding: 1rem; border-radius: 5px; overflow-x: auto; border-left: 4px solid #007acc; }
+    pre code { background: none; padding: 0; }
+    .endpoint { background: #fff; border: 1px solid #ddd; border-radius: 5px; padding: 1rem; margin: 1rem 0; }
+    .method { display: inline-block; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.8rem; }
+    .get { background: #61affe; color: white; }
+    .post { background: #49cc90; color: white; }
+    .nav { background: #f0f0f0; padding: 1rem; border-radius: 5px; margin-bottom: 2rem; }
+    .nav a { margin-right: 1rem; text-decoration: none; color: #007acc; }
+    .nav a:hover { text-decoration: underline; }
+    .warning { background: #fff3cd; border: 1px solid #ffeaa7; border-radius: 5px; padding: 1rem; margin: 1rem 0; }
+    .success { background: #d4edda; border: 1px solid #c3e6cb; border-radius: 5px; padding: 1rem; margin: 1rem 0; }
+  </style>
+</head>
+<body>
+  <div class="nav">
+    <a href="/">← Back to Home</a>
+    <a href="/admin">Admin Panel</a>
+  </div>
+
+  <h1>🚀 gh-proxy API Documentation</h1>
+  
+  <p>gh-proxy is a GitHub API proxy that provides rate limiting, caching, and token pooling for GitHub API requests.</p>
+
+  <div class="warning">
+    <strong>⚠️ API Key Required:</strong> All API requests require a valid API key. Contact an administrator to get one.
+  </div>
+
+  <h2>📋 Quick Start</h2>
+
+  <h3>Base URL</h3>
+  <pre><code>{{.BaseURL}}</code></pre>
+
+  <h3>Authentication</h3>
+  <p>Include your API key in the <code>X-API-Key</code> header:</p>
+  <pre><code>curl -H "X-API-Key: your_api_key_here" {{.BaseURL}}/gh/user</code></pre>
+
+  <h2>🔗 Available Endpoints</h2>
+
+  <div class="endpoint">
+    <h3><span class="method get">GET</span> /gh/{path}</h3>
+    <p><strong>Description:</strong> Proxy any GitHub REST API endpoint</p>
+    <p><strong>Example:</strong></p>
+    <pre><code># Get current user
+curl -H "X-API-Key: your_key" {{.BaseURL}}/gh/user
+
+# Get repository information
+curl -H "X-API-Key: your_key" {{.BaseURL}}/gh/repos/octocat/Hello-World
+
+# List user repositories
+curl -H "X-API-Key: your_key" {{.BaseURL}}/gh/users/octocat/repos
+
+# Search repositories
+curl -H "X-API-Key: your_key" "{{.BaseURL}}/gh/search/repositories?q=javascript"</code></pre>
+  </div>
+
+  <div class="endpoint">
+    <h3><span class="method post">POST</span> /gh/graphql</h3>
+    <p><strong>Description:</strong> Proxy GitHub GraphQL API</p>
+    <p><strong>Content-Type:</strong> application/json</p>
+    <p><strong>Example:</strong></p>
+    <pre><code># GraphQL query
+curl -X POST \
+  -H "X-API-Key: your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "query { viewer { login name } }"}' \
+  {{.BaseURL}}/gh/graphql</code></pre>
+  </div>
+
+  <h2>⚡ Rate Limiting</h2>
+  <p>Each API key has its own rate limit (configurable per key, default: 10 requests/second).</p>
+  <div class="warning">
+    <p><strong>Rate Limit Exceeded:</strong> Returns <code>429 Too Many Requests</code> when limit is exceeded.</p>
+  </div>
+
+  <h2>🗄️ Caching</h2>
+  <p>Responses are automatically cached to improve performance:</p>
+  <ul>
+    <li><strong>Cached:</strong> GET and HEAD requests with successful responses (200 OK)</li>
+    <li><strong>Not Cached:</strong> POST, PUT, DELETE requests</li>
+    <li><strong>Cache Headers:</strong> Check <code>X-Gh-Proxy-Cache</code> header for hit/miss status</li>
+    <li><strong>Cache Duration:</strong> Configurable (default: 5 minutes)</li>
+  </ul>
+
+  <div class="success">
+    <p><strong>Cache Hit:</strong> <code>X-Gh-Proxy-Cache: hit</code> means the response came from cache</p>
+    <p><strong>Cache Miss:</strong> <code>X-Gh-Proxy-Cache: miss</code> means a fresh request was made to GitHub</p>
+  </div>
+
+  <h2>📊 Response Headers</h2>
+  <p>The proxy adds helpful debug headers to responses:</p>
+  <ul>
+    <li><code>X-Gh-Proxy-Cache</code>: hit/miss - Whether response came from cache</li>
+    <li><code>X-Gh-Proxy-Category</code>: core/search/graphql - API category used</li>
+    <li><code>X-Gh-Proxy-Client</code>: Your API key identifier</li>
+    <li><code>X-Gh-Proxy-Donor</code>: GitHub user who donated the token used (when applicable)</li>
+  </ul>
+
+  <h2>🔧 JavaScript/Node.js Examples</h2>
+
+  <h3>Using fetch()</h3>
+  <pre><code>const response = await fetch('{{.BaseURL}}/gh/user', {
+  headers: {
+    'X-API-Key': 'your_api_key_here'
+  }
+});
+const user = await response.json();
+console.log(user);</code></pre>
+
+  <h3>Using axios</h3>
+  <pre><code>const axios = require('axios');
+
+const api = axios.create({
+  baseURL: '{{.BaseURL}}/gh',
+  headers: {
+    'X-API-Key': 'your_api_key_here'
+  }
+});
+
+// Get user info
+const user = await api.get('/user');
+
+// GraphQL query
+const graphql = await api.post('/graphql', {
+  query: 'query { viewer { login repositories(first: 10) { nodes { name } } } }'
+});</code></pre>
+
+  <h2>🐍 Python Example</h2>
+  <pre><code>import requests
+
+headers = {'X-API-Key': 'your_api_key_here'}
+
+# REST API
+response = requests.get('{{.BaseURL}}/gh/user', headers=headers)
+user = response.json()
+
+# GraphQL
+graphql_query = {
+    "query": "query { viewer { login name } }"
+}
+response = requests.post('{{.BaseURL}}/gh/graphql', 
+                        headers=headers, 
+                        json=graphql_query)
+data = response.json()</code></pre>
+
+  <h2>⚠️ Error Responses</h2>
+  <ul>
+    <li><code>401 Unauthorized</code>: Missing or invalid API key</li>
+    <li><code>403 Forbidden</code>: API key disabled or insufficient permissions</li>
+    <li><code>413 Request Entity Too Large</code>: Request body too large (max 1MB)</li>
+    <li><code>429 Too Many Requests</code>: Rate limit exceeded</li>
+  </ul>
+
+  <h2>💡 Tips & Best Practices</h2>
+  <ul>
+    <li><strong>Cache Efficiently:</strong> Use GET requests when possible to benefit from caching</li>
+    <li><strong>Handle Rate Limits:</strong> Implement exponential backoff for 429 responses</li>
+    <li><strong>Check Headers:</strong> Use debug headers to monitor cache performance</li>
+    <li><strong>Batch Requests:</strong> Use GraphQL for complex queries to reduce request count</li>
+    <li><strong>Monitor Usage:</strong> Check the admin panel for usage statistics</li>
+  </ul>
+
+  <h2>📞 Support</h2>
+  <p>For API keys or technical support, contact your system administrator.</p>
+  
+  <div class="nav">
+    <a href="/">← Back to Home</a>
+    <a href="/admin">Admin Panel</a>
+  </div>
+</body>
+</html>

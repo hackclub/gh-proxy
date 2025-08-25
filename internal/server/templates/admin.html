@@ -12,9 +12,15 @@
     .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem }
     .card { border: 1px solid #eee; border-radius: 8px; padding: 1rem }
     .muted { color: #666 }
+    .nav-link { display: inline-block; margin-right: 1rem; padding: 0.5rem 1rem; background: #f0f0f0; color: #333; text-decoration: none; border-radius: 4px; font-size: 0.9rem; }
+    .nav-link:hover { background: #e0e0e0; }
   </style>
 </head>
 <body>
+  <div style="margin-bottom: 1rem;">
+    <a href="/" class="nav-link">← Home</a>
+    <a href="/docs" class="nav-link">📚 API Docs</a>
+  </div>
   <h1>Admin</h1>
   <div class="grid">
     <div class="card"><div>Total requests</div><h2 id="totalRequests">{{.totalRequests}}</h2></div>

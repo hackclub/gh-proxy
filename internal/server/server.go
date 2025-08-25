@@ -66,6 +66,7 @@ func New(pool *pgxpool.Pool, cfg config.Config) *Server {
 	r := mux.NewRouter()
 	r.Use(s.requestLogger)
 	r.HandleFunc("/", s.handleIndex).Methods("GET")
+	r.HandleFunc("/docs", s.handleDocs).Methods("GET")
 	r.HandleFunc("/auth/github/login", s.handleGitHubLogin).Methods("GET")
 	// support POST /auth/github to mimic provided form
 	r.HandleFunc("/auth/github", s.handleGitHubLogin).Methods("POST")
@@ -127,6 +128,13 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"LastAgo": lastAgo,
 	}
 	s.render(w, "index.html", data)
+}
+
+func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
+	data := map[string]any{
+		"BaseURL": s.cfg.BaseURL,
+	}
+	s.render(w, "docs.html", data)
 }
 
 func humanizeDuration(d time.Duration) string {
