@@ -257,9 +257,10 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 	// Fetch from GitHub and cache
 	status, hdr, respBody, usedToken, err := s.gh.Do(r.Context(), r.Method, fullTarget, body)
 	if err != nil { log.Println("proxy error:", err) }
-	// Only cache successful, cacheable responses, and prefer public cache-control
+	// Cache successful, cacheable responses (GitHub API responses are safe to cache even if private)
 	if cacheable && status == http.StatusOK {
-		if cc := strings.ToLower(hdr.Get("Cache-Control")); cc == "" || strings.Contains(cc, "public") {
+		// Skip caching only if explicitly no-cache or no-store
+		if cc := strings.ToLower(hdr.Get("Cache-Control")); !strings.Contains(cc, "no-cache") && !strings.Contains(cc, "no-store") {
 			hdrJSON, _ := json.Marshal(hdr)
 			_ = s.cache.Put(r.Context(), r.Method, fullTarget, body, status, hdrJSON, respBody)
 		}
