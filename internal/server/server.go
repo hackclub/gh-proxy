@@ -1,16 +1,23 @@
 package server
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"embed"
+	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
-	"crypto/sha256"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,10 +55,10 @@ func New(pool *pgxpool.Pool, cfg config.Config) *Server {
 		cfg: cfg,
 		cache: cache.New(pool, cfg.MaxCacheTime.Duration(), cfg.MaxCacheSizeMB),
 		gh: gh.New(pool),
-		u: upgrader{Upgrader: websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}},
 		hub: newWSHub(),
 		ratelimit: newRateLimiter(),
 	}
+	s.u = upgrader{Upgrader: websocket.Upgrader{CheckOrigin: s.checkWebsocketOrigin}}
 	s.tmpl = template.Must(template.ParseFS(templatesFS, "templates/*.html"))
 	go s.hub.run()
 	go s.cacheJanitor()
@@ -93,7 +100,9 @@ func (s *Server) cacheJanitor() {
 func (s *Server) basicAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
-		if !ok || user != s.cfg.AdminUser || pass != s.cfg.AdminPass {
+		if !ok ||
+			subtle.ConstantTimeCompare([]byte(user), []byte(s.cfg.AdminUser)) != 1 ||
+			subtle.ConstantTimeCompare([]byte(pass), []byte(s.cfg.AdminPass)) != 1 {
 			w.Header().Set("WWW-Authenticate", "Basic realm=Restricted")
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte("Unauthorized"))
@@ -133,13 +142,19 @@ func humanizeDuration(d time.Duration) string {
 }
 
 func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
-	// initial render with current stats; live updates via WS
-	s.render(w, "admin.html", s.stats())
+	// issue CSRF token cookie and pass value to template
+	csrf := s.issueCSRFCookie(w, r)
+	data := s.stats()
+	data["csrf"] = csrf
+	s.render(w, "admin.html", data)
 }
 
 func (s *Server) handleAdminWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.u.Upgrade(w, r, nil)
-	if err != nil { return }
+	if err != nil {
+		log.Printf("admin ws upgrade failed: %v", err)
+		return
+	}
 	client := &wsClient{conn: conn, send: make(chan []byte, 16)}
 	s.hub.register <- client
 	go client.writePump(s.hub)
@@ -148,6 +163,7 @@ func (s *Server) handleAdminWS(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil { http.Error(w, err.Error(), 400); return }
+	if !s.checkCSRF(r) { http.Error(w, "bad csrf", 403); return }
 	hc := r.FormValue("hc_username")
 	app := r.FormValue("app_name")
 	machine := r.FormValue("machine")
@@ -159,7 +175,12 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 	suffix := randString(24)
 	key := prefix + suffix
 	keyHash := sha256Hex(key)
-	_, err := s.pool.Exec(r.Context(), `INSERT INTO api_keys(key_hash,key_prefix,hc_username,app_name,machine,rate_limit_per_sec) VALUES($1,$2,$3,$4,$5,$6)`, keyHash, key[:5], hc, app, machine, per)
+	// random segment is after last underscore
+	randSeg := ""
+	if i := strings.LastIndex(key, "_"); i >= 0 && i+1 < len(key) { randSeg = key[i+1:] }
+	hint := randSeg
+	if len(hint) > 6 { hint = hint[:6] }
+	_, err := s.pool.Exec(r.Context(), `INSERT INTO api_keys(key_hash,key_hint,hc_username,app_name,machine,rate_limit_per_sec) VALUES($1,$2,$3,$4,$5,$6)`, keyHash, hint, hc, app, machine, per)
 	if err != nil { http.Error(w, err.Error(), 500); return }
 	log.Printf("created api key for %s/%s on %s: %s", hc, app, machine, maskKey(key))
 	// Show the key once to the admin immediately
@@ -168,6 +189,9 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDisableAPIKey(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err == nil {
+		if !s.checkCSRF(r) { http.Error(w, "bad csrf", 403); return }
+	}
 	id := mux.Vars(r)["id"]
 	_, err := s.pool.Exec(r.Context(), `UPDATE api_keys SET disabled=true WHERE id::text=$1`, id)
 	if err != nil { http.Error(w, err.Error(), 500); return }
@@ -194,46 +218,67 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 	if disabled { log.Printf("deny disabled key: %s", maskKey(apiKey)); http.Error(w, "api key disabled", 403); return }
 	if !s.ratelimit.Allow(apiKeyHash, perSec) { log.Printf("429 rate limit for key %s", maskKey(apiKey)); http.Error(w, "rate limit exceeded", 429); return }
 
+	// bound body size for safety (configurable)
+	if r.ContentLength > 0 && s.cfg.MaxProxyBodyBytes > 0 && r.ContentLength > s.cfg.MaxProxyBodyBytes {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge); return
+	}
+	if s.cfg.MaxProxyBodyBytes > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxProxyBodyBytes)
+	}
 	body, _ := io.ReadAll(r.Body)
 	defer r.Body.Close()
 
 	fullTarget := targetWithQuery(target, r.URL.RawQuery)
 
-	// Try cache first
-	if status, hdrJSON, cached, hit, err := s.cache.Get(r.Context(), r.Method, fullTarget, body); err == nil && hit {
-		wHeaderFromJSON(w.Header(), hdrJSON)
-		w.Header().Set("X-Cache-Hit", "1")
-		w.WriteHeader(status)
-		_, _ = w.Write(cached)
-		s.afterRequest(r.Context(), apiKey, r.Method, r.URL.Path, status, true)
-		return
+	cacheable := r.Method == http.MethodGet || r.Method == http.MethodHead
+	// Try cache first (GET/HEAD only)
+	if cacheable {
+		if status, hdrJSON, cached, hit, err := s.cache.Get(r.Context(), r.Method, fullTarget, body); err == nil && hit {
+			wHeaderFromJSON(w.Header(), hdrJSON)
+			// add debug headers
+			w.Header().Set("X-Gh-Proxy-Cache", "hit")
+			w.Header().Set("X-Gh-Proxy-Category", ghCategory(fullTarget))
+			if disp := s.lookupClientDisplay(r.Context(), apiKeyHash); disp != "" { w.Header().Set("X-Gh-Proxy-Client", disp) }
+			w.WriteHeader(status)
+			_, _ = w.Write(cached)
+			s.afterRequest(r.Context(), apiKeyHash, r.Method, r.URL.Path, status, true)
+			return
+		}
 	}
 
 	// Fetch from GitHub and cache
 	status, hdr, respBody, usedToken, err := s.gh.Do(r.Context(), r.Method, fullTarget, body)
 	if err != nil { log.Println("proxy error:", err) }
-	hdrJSON, _ := json.Marshal(hdr)
-	_ = s.cache.Put(r.Context(), r.Method, fullTarget, body, status, hdrJSON, respBody)
+	// Only cache successful, cacheable responses, and prefer public cache-control
+	if cacheable && status == http.StatusOK {
+		if cc := strings.ToLower(hdr.Get("Cache-Control")); cc == "" || strings.Contains(cc, "public") {
+			hdrJSON, _ := json.Marshal(hdr)
+			_ = s.cache.Put(r.Context(), r.Method, fullTarget, body, status, hdrJSON, respBody)
+		}
+	}
 
 	wHeaderCopy(w.Header(), hdr)
-	// annotate which token/user was used
+	// annotate debug headers
+	w.Header().Set("X-Gh-Proxy-Cache", "miss")
+	w.Header().Set("X-Gh-Proxy-Category", ghCategory(fullTarget))
+	if disp := s.lookupClientDisplay(r.Context(), apiKeyHash); disp != "" { w.Header().Set("X-Gh-Proxy-Client", disp) }
 	if usedToken != "" {
 		var user string
 		_ = s.pool.QueryRow(r.Context(), `SELECT github_user FROM donated_tokens WHERE id::text=$1`, usedToken).Scan(&user)
-		if user != "" { w.Header().Set("X-Proxy-Token-User", user) }
+		if user != "" { w.Header().Set("X-Gh-Proxy-Donor", user) }
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(respBody)
 
-	s.afterRequest(r.Context(), apiKey, r.Method, r.URL.Path, status, false)
+	s.afterRequest(r.Context(), apiKeyHash, r.Method, r.URL.Path, status, false)
 }
 
-func (s *Server) afterRequest(ctx context.Context, apiKey, method, path string, status int, hit bool) {
+func (s *Server) afterRequest(ctx context.Context, apiKeyHash, method, path string, status int, hit bool) {
 	if hit { s.cacheHits.Add(1) }
 	s.totalReq.Add(1)
-	s.logRequest(ctx, apiKey, method, path, status, hit)
+	s.logRequest(ctx, apiKeyHash, method, path, status, hit)
 	log.Printf("%s %s -> %d (%s)", method, path, status, map[bool]string{true:"cache", false:"origin"}[hit])
-	s.hub.broadcastRecent(fmt.Sprintf("%s %s", method, path))
+	s.hub.broadcastRecent(map[string]any{"method":method, "path":path, "created_at": time.Now(), "display": s.lookupClientDisplay(ctx, apiKeyHash)})
 	s.hub.broadcastStat(s.stats())
 }
 
@@ -256,8 +301,6 @@ func (s *Server) LogsJanitor() {
 
 func (s *Server) stats() map[string]any {
 	ctx := context.Background()
-	var total int64
-	_ = s.pool.QueryRow(ctx, `SELECT count(*) FROM request_logs`).Scan(&total)
 	var hitPct float64
 	_ = s.pool.QueryRow(ctx, `SELECT COALESCE(AVG(CASE WHEN cache_hit THEN 1.0 ELSE 0.0 END)*100,0) FROM request_logs`).Scan(&hitPct)
 	var today int64
@@ -265,7 +308,7 @@ func (s *Server) stats() map[string]any {
 	var activeDonated int64
 	_ = s.pool.QueryRow(ctx, `SELECT count(*) FROM donated_tokens WHERE revoked=false`).Scan(&activeDonated)
 	return map[string]any{
-		"totalRequests": total,
+		"totalRequests": s.totalReq.Load(), // incrementing counter since process start
 		"cacheHitRate": fmt.Sprintf("%.1f%%", hitPct),
 		"today": today,
 		"activeTokens": activeDonated,
@@ -275,6 +318,11 @@ func (s *Server) stats() map[string]any {
 func percent(a, b int64) float64 { if b==0 { return 0 }; return float64(a) * 100 / float64(b) }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	// allow inline script in admin.html (current page uses inline <script>)
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src https: data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := s.tmpl.ExecuteTemplate(w, name, data); err != nil { http.Error(w, err.Error(), 500) }
 }
@@ -283,9 +331,16 @@ func (s *Server) render(w http.ResponseWriter, name string, data any) {
 
 func targetWithQuery(target, raw string) string { if raw=="" { return target }; if strings.Contains(target, "?") { return target+"&"+raw }; return target+"?"+raw }
 
+func ghCategory(u string) string {
+	if strings.Contains(u, "/graphql") { return "graphql" }
+	if strings.Contains(u, "/search/code") { return "code_search" }
+	if strings.Contains(u, "/search/") { return "search" }
+	return "core"
+}
+
 func wHeaderCopy(dst http.Header, src http.Header) {
 	for k, v := range src {
-		if isHopByHop(k) { continue }
+		if isHopByHop(k) || isBlockedResponseHeader(k) { continue }
 		for _, vv := range v { dst.Add(k, vv) }
 	}
 }
@@ -294,7 +349,7 @@ func wHeaderFromJSON(dst http.Header, b []byte) {
 	var m map[string][]string
 	_ = json.Unmarshal(b, &m)
 	for k, v := range m {
-		if isHopByHop(k) { continue }
+		if isHopByHop(k) || isBlockedResponseHeader(k) { continue }
 		for _, vv := range v { dst.Add(k, vv) }
 	}
 }
@@ -306,6 +361,31 @@ func isHopByHop(h string) bool {
 	default:
 		return false
 	}
+}
+
+func isBlockedResponseHeader(h string) bool {
+	switch strings.ToLower(h) {
+	case "set-cookie", "strict-transport-security", "public-key-pins", "content-length":
+		return true
+	default:
+		return false
+	}
+}
+
+// Build display form for a key: hc_app_machine_hint (hint optional)
+func formatKeyDisplay(hc, app, machine, hint string) string {
+	base := fmt.Sprintf("%s_%s_%s", hc, app, machine)
+	if hint == "" { return base }
+	return base + "_" + hint
+}
+
+// lookup display from api_keys by hash
+func (s *Server) lookupClientDisplay(ctx context.Context, keyHash string) string {
+	var hc, app, machine, h string
+	if err := s.pool.QueryRow(ctx, `SELECT hc_username, app_name, machine, COALESCE(key_hint,'') FROM api_keys WHERE key_hash=$1`, keyHash).Scan(&hc, &app, &machine, &h); err == nil {
+		return formatKeyDisplay(hc, app, machine, h)
+	}
+	return ""
 }
 
 func parseAPIKey(v string) string { return strings.TrimSpace(v) }
@@ -321,11 +401,13 @@ func maskKey(k string) string {
 	return k[:6] + "…" + k[len(k)-4:]
 }
 
+// cryptographically secure random string in [a-z0-9]
 func randString(n int) string {
 	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, n)
-	for i := range b { b[i] = letters[int(time.Now().UnixNano()+int64(i))%len(letters)] }
-	return string(b)
+	rb := make([]byte, n)
+	if _, err := rand.Read(rb); err != nil { panic(err) }
+	for i := range rb { rb[i] = letters[int(rb[i])%len(letters)] }
+	return string(rb)
 }
 
 // WebSocket hub
@@ -359,6 +441,14 @@ func (l *loggingResponseWriter) WriteHeader(code int) {
 	l.ResponseWriter.WriteHeader(code)
 }
 
+// Ensure websocket upgrades work through our wrapper
+func (l *loggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := l.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, errors.New("hijack not supported")
+}
+
 // simple in-memory token bucket per API key
 type rateLimiter struct {
 	mu sync.Mutex
@@ -376,6 +466,7 @@ func newRateLimiter() *rateLimiter { return &rateLimiter{buckets: make(map[strin
 func (rl *rateLimiter) Allow(key string, perSec int) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	if perSec <= 0 { return false } // do not create buckets for invalid/disabled keys
 	b := rl.buckets[key]
 	if b == nil { b = &bucket{capacity: perSec, tokens: float64(perSec), last: time.Now()}; rl.buckets[key] = b }
 	// refill
@@ -389,6 +480,42 @@ func (rl *rateLimiter) Allow(key string, perSec int) bool {
 		return true
 	}
 	return false
+}
+
+// CSRF helpers for admin (double-submit cookie)
+func (s *Server) issueCSRFCookie(w http.ResponseWriter, r *http.Request) string {
+	if c, err := r.Cookie("admin_csrf"); err == nil && len(c.Value) >= 20 {
+		return c.Value
+	}
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	token := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b)
+	http.SetCookie(w, &http.Cookie{
+		Name:     "admin_csrf",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   strings.HasPrefix(s.cfg.BaseURL, "https://"),
+		MaxAge:   86400 * 7,
+	})
+	return token
+}
+
+func (s *Server) checkCSRF(r *http.Request) bool {
+	c, err := r.Cookie("admin_csrf")
+	if err != nil { return false }
+	return subtle.ConstantTimeCompare([]byte(c.Value), []byte(r.FormValue("csrf"))) == 1
+}
+
+func (s *Server) checkWebsocketOrigin(r *http.Request) bool {
+	o := r.Header.Get("Origin")
+	if o == "" { return false }
+	base, err := url.Parse(s.cfg.BaseURL)
+	if err != nil { return false }
+	u, err := url.Parse(o)
+	if err != nil { return false }
+	return u.Scheme == base.Scheme && u.Host == base.Host
 }
 
 func newWSHub() *wsHub { return &wsHub{clients: map[*wsClient]bool{}, broadcast: make(chan []byte, 16), register: make(chan *wsClient), unregister: make(chan *wsClient)} }
@@ -407,7 +534,7 @@ func (h *wsHub) run() {
 }
 
 func (h *wsHub) broadcastStat(m map[string]any) { b, _ := json.Marshal(map[string]any{"type":"stats","data":m}); h.broadcast <- b }
-func (h *wsHub) broadcastRecent(s string) { b, _ := json.Marshal(map[string]any{"type":"recent","data":s}); h.broadcast <- b }
+func (h *wsHub) broadcastRecent(v any) { b, _ := json.Marshal(map[string]any{"type":"recent","data":v}); h.broadcast <- b }
 
 type wsClient struct { conn *websocket.Conn; send chan []byte }
 

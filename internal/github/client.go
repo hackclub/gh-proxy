@@ -89,6 +89,7 @@ func (c *Client) Do(ctx context.Context, method, url string, body []byte) (statu
 	if err != nil { return 0, nil, nil, "", err }
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", "gh-proxy/1.0")
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := c.http.Do(req)
 	if err != nil { return 0, nil, nil, "", err }
@@ -97,10 +98,21 @@ func (c *Client) Do(ctx context.Context, method, url string, body []byte) (statu
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
 		var user string
 		_ = c.pool.QueryRow(ctx, `SELECT github_user FROM donated_tokens WHERE id::text=$1`, id).Scan(&user)
-		_, _ = c.pool.Exec(ctx, `UPDATE donated_tokens SET revoked=true WHERE id=$1`, id)
-		logMsg := "token unauthorized; marked revoked"
-		if user != "" { logMsg += " (@" + user + ")" }
-		return resp.StatusCode, resp.Header, b, id, fmt.Errorf(logMsg)
+		// Only revoke on 401 or explicit bad credentials
+		shouldRevoke := resp.StatusCode == 401
+		if resp.StatusCode == 403 {
+			var em struct{ Message string `json:"message"` }
+			_ = json.Unmarshal(b, &em)
+			if strings.Contains(strings.ToLower(em.Message), "bad credentials") {
+				shouldRevoke = true
+			}
+		}
+		if shouldRevoke {
+			_, _ = c.pool.Exec(ctx, `UPDATE donated_tokens SET revoked=true WHERE id=$1`, id)
+			logMsg := "token unauthorized; marked revoked"
+			if user != "" { logMsg += " (@" + user + ")" }
+			return resp.StatusCode, resp.Header, b, id, fmt.Errorf(logMsg)
+		}
 	}
 	// update rate limits from headers if present
 	// Alternatively call /rate_limit periodically

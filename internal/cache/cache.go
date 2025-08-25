@@ -28,7 +28,6 @@ func hash(b []byte) string {
 }
 
 func (c *Cache) Get(ctx context.Context, method, url string, body []byte) (status int, headers []byte, resp []byte, ok bool, err error) {
-	if c.maxAge == 0 { return 0, nil, nil, false, nil }
 	contentHash := hash(body)
 	row := c.pool.QueryRow(ctx, `SELECT status, resp_headers, resp_body FROM cached_responses WHERE method=$1 AND url=$2 AND content_hash=$3 AND (expires_at IS NULL OR expires_at > now()) ORDER BY id DESC LIMIT 1`, method, url, contentHash)
 	err = row.Scan(&status, &headers, &resp)
@@ -41,7 +40,7 @@ func (c *Cache) Get(ctx context.Context, method, url string, body []byte) (statu
 
 func (c *Cache) Put(ctx context.Context, method, url string, reqBody []byte, status int, respHeaders []byte, respBody []byte) error {
 	var expires *time.Time
-	if c.maxAge > 0 { t := time.Now().Add(c.maxAge); expires = &t }
+	if c.maxAge > 0 { t := time.Now().Add(c.maxAge); expires = &t } // 0 => unlimited (NULL)
 	_, err := c.pool.Exec(ctx, `INSERT INTO cached_responses(method,url,req_body,status,resp_headers,resp_body,expires_at,content_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, method, url, reqBody, status, respHeaders, respBody, expires, hash(reqBody))
 	return err
 }

@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>gh-proxy admin</title>
+  <meta name="csrf-token" content="{{.csrf}}" />
   <style>
     body { font-family: -apple-system, system-ui, sans-serif; margin: 1rem; }
     table { border-collapse: collapse; width: 100%; }
@@ -28,11 +29,12 @@
     <input name="app_name" placeholder="App name" required />
     <input name="machine" placeholder="Machine" required />
     <input name="rate_limit" type="number" placeholder="Rate limit per second (default 10)" />
+    <input type="hidden" name="csrf" value="{{.csrf}}" />
     <button type="submit">Create</button>
   </form>
 
   <table>
-    <thead><tr><th>Name</th><th>Preview</th><th>Total requests</th><th>Cache hit rate</th><th>Last used</th><th>Daily (7d)</th><th>Actions</th></tr></thead>
+    <thead><tr><th>Key</th><th>Total requests</th><th>Cache hit rate</th><th>Last used</th><th>Daily (7d)</th><th>Actions</th></tr></thead>
     <tbody id="apikeys"></tbody>
   </table>
 
@@ -41,6 +43,7 @@
 
 <script>
 const ws = new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/admin/ws');
+const CSRF = document.querySelector('meta[name="csrf-token"]').content;
 ws.onmessage = (ev) => {
   const msg = JSON.parse(ev.data);
   if (msg.type==='stats') {
@@ -55,23 +58,41 @@ ws.onmessage = (ev) => {
   }
 };
 
-function appendRecent(text) {
+function ago(ts){
+  const d = new Date(ts);
+  const s = Math.max(1, Math.floor((Date.now()-d.getTime())/1000));
+  if (s<60) return s+"s ago";
+  const m = Math.floor(s/60); if (m<60) return m+"m ago";
+  const h = Math.floor(m/60); if (h<24) return h+"h ago";
+  const days = Math.floor(h/24); return days+"d ago";
+}
+
+function appendRecent(data) {
   const li = document.createElement('li');
-  li.textContent = text;
+  if (typeof data === 'string') {
+    li.textContent = data;
+  } else {
+    li.textContent = `${data.display||''} — ${data.method} ${data.path} — ${ago(data.created_at)}`;
+  }
   const ul = document.getElementById('recent');
   ul.prepend(li);
   while (ul.children.length>1000) ul.removeChild(ul.lastChild);
 }
 
 function sparkline(points) {
-  // points is array of numbers length <= 7
   const max = Math.max(1, ...points);
   const w = 70, h = 18, pad = 2;
   const step = (w - pad*2) / Math.max(1, points.length-1);
   const ys = points.map(v => h - pad - (v/max)*(h - pad*2));
+  const svg = document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svg.setAttribute('width', w); svg.setAttribute('height', h);
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  const path = document.createElementNS('http://www.w3.org/2000/svg','path');
   let d = '';
   ys.forEach((y,i) => { const x = pad + i*step; d += (i?' L':'M')+x.toFixed(1)+','+y.toFixed(1); });
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><path d="${d}" fill="none" stroke="#111" stroke-width="1.5"/></svg>`;
+  path.setAttribute('d', d); path.setAttribute('fill','none'); path.setAttribute('stroke','#111'); path.setAttribute('stroke-width','1.5');
+  svg.appendChild(path);
+  return svg;
 }
 
 async function refreshAPIKeys(){
@@ -86,9 +107,20 @@ async function refreshAPIKeys(){
   tbody.innerHTML = '';
   for (const k of data) {
     const tr = document.createElement('tr');
-    const name = `${k.hc}_${k.app}_${k.machine}`;
-    const series = (usage[name]||[]).map(p=>p.c);
-    tr.innerHTML = `<td>${name}</td><td>${k.prefix}…</td><td>${k.total}</td><td>${k.hit_rate.toFixed ? k.hit_rate.toFixed(1)+'%' : k.hit_rate}</td><td>${k.last_used||''}</td><td>${sparkline(series)}</td><td>${k.disabled?'disabled':`<form method='post' action='/admin/apikeys/${k.id}/disable'><button>Disable</button></form>`}</td>`;
+    const tdKey = document.createElement('td'); tdKey.textContent = k.display; tr.appendChild(tdKey);
+    const tdTotal = document.createElement('td'); tdTotal.textContent = String(k.total); tr.appendChild(tdTotal);
+    const tdHit = document.createElement('td'); tdHit.textContent = (k.hit_rate && k.hit_rate.toFixed) ? k.hit_rate.toFixed(1)+'%' : String(k.hit_rate); tr.appendChild(tdHit);
+    const tdLast = document.createElement('td'); tdLast.textContent = k.last_used || ''; tr.appendChild(tdLast);
+    const tdSpark = document.createElement('td'); tdSpark.appendChild(sparkline((usage[k.id]||[]).map(p=>p.c))); tr.appendChild(tdSpark);
+    const tdAct = document.createElement('td');
+    if (k.disabled) { tdAct.textContent = 'disabled'; }
+    else {
+      const form = document.createElement('form'); form.method = 'post'; form.action = `/admin/apikeys/${k.id}/disable`;
+      const hidden = document.createElement('input'); hidden.type='hidden'; hidden.name='csrf'; hidden.value=CSRF; form.appendChild(hidden);
+      const btn = document.createElement('button'); btn.textContent = 'Disable'; form.appendChild(btn);
+      tdAct.appendChild(form);
+    }
+    tr.appendChild(tdAct);
     tbody.appendChild(tr);
   }
 }
@@ -102,7 +134,7 @@ fetch('/admin/recent.json').then(r=>r.ok?r.json():[]).then(rows=>{
   // rows come sorted DESC from the server; iterate from oldest->newest so prepend yields newest at top
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i];
-    appendRecent(`${r.method} ${r.path}`);
+    appendRecent(r);
   }
 });
 </script>

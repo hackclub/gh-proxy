@@ -18,6 +18,7 @@ type Config struct {
 	MaxCacheTime      timeDuration
 	MaxCacheSizeMB    int64
 	DBMaxConns        int32
+	MaxProxyBodyBytes int64
 }
 
 type timeDuration struct{ Seconds int64 }
@@ -44,6 +45,7 @@ func Load() Config {
 		MaxCacheTime:       timeDuration{Seconds: maxCacheTime},
 		MaxCacheSizeMB:     maxCacheSize,
 		DBMaxConns:         int32(parseInt(getenv("DB_MAX_CONNS", "20"))),
+		MaxProxyBodyBytes:  parseInt(getenv("MAX_PROXY_BODY_BYTES", "1048576")), // 1 MiB
 	}
 	if cfg.GithubClientID == "" || cfg.GithubClientSecret == "" {
 		log.Println("warning: GitHub OAuth env vars not set; donating tokens won't work")
