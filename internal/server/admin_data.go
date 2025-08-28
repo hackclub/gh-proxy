@@ -14,8 +14,8 @@ SELECT k.id::text,
        k.app_name,
        k.machine,
        COALESCE(k.key_hint, '') as key_hint,
-       COALESCE((SELECT count(*) FROM request_logs rl WHERE rl.api_key=k.key_hash),0) AS total,
-       COALESCE((SELECT AVG(CASE WHEN rl.cache_hit THEN 1 ELSE 0 END) * 100 FROM request_logs rl WHERE rl.api_key=k.key_hash),0) AS hit_rate,
+       k.total_requests AS total,
+       CASE WHEN k.total_requests > 0 THEN (k.total_cached_requests::float / k.total_requests::float) * 100 ELSE 0 END AS hit_rate,
        k.last_used_at,
        k.disabled
 FROM api_keys k

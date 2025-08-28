@@ -293,7 +293,16 @@ func (s *Server) afterRequest(ctx context.Context, apiKeyHash, method, path stri
 
 func (s *Server) logRequest(ctx context.Context, apiKeyHash, method, path string, status int, hit bool) {
 	_, _ = s.pool.Exec(ctx, `INSERT INTO request_logs(api_key,method,path,status,cache_hit) VALUES($1,$2,$3,$4,$5)`, apiKeyHash, method, path, status, hit)
-	_, _ = s.pool.Exec(ctx, `UPDATE api_keys SET last_used_at=now() WHERE key_hash=$1`, apiKeyHash)
+	
+	// Update cumulative stats - system level
+	s.updateSystemStats(ctx, hit)
+	
+	// Update cumulative stats - per API key level
+	if hit {
+		_, _ = s.pool.Exec(ctx, `UPDATE api_keys SET last_used_at=now(), total_requests=total_requests+1, total_cached_requests=total_cached_requests+1 WHERE key_hash=$1`, apiKeyHash)
+	} else {
+		_, _ = s.pool.Exec(ctx, `UPDATE api_keys SET last_used_at=now(), total_requests=total_requests+1 WHERE key_hash=$1`, apiKeyHash)
+	}
 }
 
 // prune request_logs to keep only latest N rows periodically (avoid doing it on hot path)
@@ -308,18 +317,67 @@ func (s *Server) LogsJanitor() {
 	}
 }
 
+// updateSystemStats increments system-wide cumulative counters and handles daily reset
+func (s *Server) updateSystemStats(ctx context.Context, hit bool) {
+	// Use NYC Eastern Time for daily reset as requested
+	loc, _ := time.LoadLocation("America/New_York")
+	currentDate := time.Now().In(loc).Format("2006-01-02")
+	
+	if hit {
+		// Increment both total requests and cached requests
+		_, _ = s.pool.Exec(ctx, `
+			INSERT INTO system_stats (id, total_requests, total_cached_requests, today_requests, today_date) 
+			VALUES (1, 1, 1, 1, $1::date)
+			ON CONFLICT (id) DO UPDATE SET
+				total_requests = system_stats.total_requests + 1,
+				total_cached_requests = system_stats.total_cached_requests + 1,
+				today_requests = CASE 
+					WHEN system_stats.today_date = $1::date THEN system_stats.today_requests + 1
+					ELSE 1
+				END,
+				today_date = $1::date,
+				updated_at = now()
+		`, currentDate)
+	} else {
+		// Increment only total requests
+		_, _ = s.pool.Exec(ctx, `
+			INSERT INTO system_stats (id, total_requests, total_cached_requests, today_requests, today_date) 
+			VALUES (1, 1, 0, 1, $1::date)
+			ON CONFLICT (id) DO UPDATE SET
+				total_requests = system_stats.total_requests + 1,
+				today_requests = CASE 
+					WHEN system_stats.today_date = $1::date THEN system_stats.today_requests + 1
+					ELSE 1
+				END,
+				today_date = $1::date,
+				updated_at = now()
+		`, currentDate)
+	}
+}
+
 func (s *Server) stats() map[string]any {
 	ctx := context.Background()
+	
+	// Get cumulative stats from system_stats table
+	var totalRequests, totalCached, todayRequests int64
+	_ = s.pool.QueryRow(ctx, `
+		SELECT total_requests, total_cached_requests, today_requests 
+		FROM system_stats WHERE id = 1
+	`).Scan(&totalRequests, &totalCached, &todayRequests)
+	
+	// Calculate cache hit rate from cumulative stats
 	var hitPct float64
-	_ = s.pool.QueryRow(ctx, `SELECT COALESCE(AVG(CASE WHEN cache_hit THEN 1.0 ELSE 0.0 END)*100,0) FROM request_logs`).Scan(&hitPct)
-	var today int64
-	_ = s.pool.QueryRow(ctx, `SELECT count(*) FROM request_logs WHERE created_at::date = now()::date`).Scan(&today)
+	if totalRequests > 0 {
+		hitPct = float64(totalCached) * 100.0 / float64(totalRequests)
+	}
+	
 	var activeDonated int64
 	_ = s.pool.QueryRow(ctx, `SELECT count(*) FROM donated_tokens WHERE revoked=false`).Scan(&activeDonated)
+	
 	return map[string]any{
-		"totalRequests": s.totalReq.Load(), // incrementing counter since process start
+		"totalRequests": totalRequests,
 		"cacheHitRate": fmt.Sprintf("%.1f%%", hitPct),
-		"today": today,
+		"today": todayRequests,
 		"activeTokens": activeDonated,
 	}
 }
