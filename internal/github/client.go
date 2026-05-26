@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -96,11 +97,17 @@ func categoryFor(url string) string {
 	return "core"
 }
 
-func (c *Client) Do(ctx context.Context, method, url string, body []byte) (status int, headers http.Header, respBody []byte, usedToken string, err error) {
-	cat := categoryFor(url)
+func (c *Client) Do(ctx context.Context, method, rawURL string, body []byte) (status int, headers http.Header, respBody []byte, usedToken string, err error) {
+	parsed, perr := url.Parse(rawURL)
+	if perr != nil { return 0, nil, nil, "", fmt.Errorf("invalid url: %w", perr) }
+	if parsed.Scheme != "https" || parsed.Host != "api.github.com" {
+		return 0, nil, nil, "", fmt.Errorf("disallowed request target")
+	}
+	safeURL := parsed.String()
+	cat := categoryFor(safeURL)
 	id, token, err := c.chooseToken(ctx, cat)
 	if err != nil { return 0, nil, nil, "", err }
-	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, method, safeURL, bytes.NewReader(body))
 	if err != nil { return 0, nil, nil, "", err }
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
