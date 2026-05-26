@@ -46,9 +46,9 @@ func Load() Config {
 		GithubClientSecret: os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"),
 		MaxCacheTime:       timeDuration{Seconds: maxCacheTime},
 		MaxCacheSizeMB:     maxCacheSize,
-		DBMaxConns:         int32(parseInt(getenv("DB_MAX_CONNS", "150"))),
-		DBMaxIdleConns:     int32(parseInt(getenv("DB_MAX_IDLE_CONNS", "50"))),
-		DBConnMaxLifetime:  int32(parseInt(getenv("DB_CONN_MAX_LIFETIME", "1800"))), // 30 minutes
+		DBMaxConns:         parseInt32(getenv("DB_MAX_CONNS", "150")),
+		DBMaxIdleConns:     parseInt32(getenv("DB_MAX_IDLE_CONNS", "50")),
+		DBConnMaxLifetime:  parseInt32(getenv("DB_CONN_MAX_LIFETIME", "1800")), // 30 minutes
 		MaxProxyBodyBytes:  parseInt(getenv("MAX_PROXY_BODY_BYTES", "1048576")), // 1MB
 	}
 	if cfg.GithubClientID == "" || cfg.GithubClientSecret == "" {
@@ -61,6 +61,12 @@ func parseInt(s string) int64 {
 	v, err := strconv.ParseInt(s, 10, 64)
 	if err != nil { return 0 }
 	return v
+}
+
+func parseInt32(s string) int32 {
+	v, err := strconv.ParseInt(s, 10, 32)
+	if err != nil { return 0 }
+	return int32(v)
 }
 
 func loadDotenv() error {
