@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
@@ -153,6 +154,33 @@ func TestOpenAPIEndpointIntegration(t *testing.T) {
 	// This test requires a running server - skip for now
 	// The OpenAPI spec is validated by TestOpenAPIEndpoint
 	t.Skip("Integration test requires running server")
+}
+
+func TestHandleOpenAPI(t *testing.T) {
+	// The handler must serve the embedded spec regardless of the working
+	// directory (production runs from a binary-only container with no source tree).
+	s := &Server{}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/openapi.json", nil)
+
+	s.handleOpenAPI(w, r)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Status = %d, want 200 (body: %s)", resp.StatusCode, w.Body.String())
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	var spec map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &spec); err != nil {
+		t.Fatalf("Response is not valid JSON: %v", err)
+	}
+	if spec["openapi"] != "3.0.3" {
+		t.Errorf("openapi = %v, want 3.0.3", spec["openapi"])
+	}
 }
 
 // TestErrorCodes validates all expected error codes are defined

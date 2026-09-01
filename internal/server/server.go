@@ -19,7 +19,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -141,8 +140,7 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
-	embedFS := os.DirFS("internal/server")
-	data, err := fs.ReadFile(embedFS, "openapi.json")
+	data, err := fs.ReadFile(openapiFS, "openapi.json")
 	if err != nil {
 		s.jsonError(w, "INTERNAL_ERROR", "Failed to load OpenAPI specification", "", http.StatusInternalServerError)
 		return
@@ -646,5 +644,8 @@ func (c *wsClient) writePump(h *wsHub) { ticker := time.NewTicker(10*time.Second
 
 //go:embed templates/*.html
 var templatesFS embed.FS
+
+//go:embed openapi.json
+var openapiFS embed.FS
 
 type upgrader struct{ websocket.Upgrader }
