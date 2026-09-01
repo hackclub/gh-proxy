@@ -26,6 +26,8 @@
 <body>
   <div class="nav">
     <a href="/">← Back to Home</a>
+    <a href="/openapi.json">OpenAPI Spec</a>
+    <a href="/llms.txt">llms.txt</a>
     <a href="/admin">Admin Panel</a>
   </div>
 
@@ -79,10 +81,31 @@ curl -X POST \
   </div>
 
   <h2>⚡ Rate Limiting</h2>
-  <p>Each API key has its own rate limit (configurable per key, default: 10 requests/second).</p>
+  <p>Each API key has its own rate limit (configurable per key, default: 10 requests/second) over a one-second window.</p>
   <div class="warning">
-    <p><strong>Rate Limit Exceeded:</strong> Returns <code>429 Too Many Requests</code> when limit is exceeded.</p>
+    <p><strong>Rate Limit Exceeded:</strong> Returns <code>429 Too Many Requests</code> when limit is exceeded, with a <code>Retry-After</code> header.</p>
   </div>
+
+  <p>Every <code>/gh/</code> response reports your live quota so you can self-throttle without waiting for a 429:</p>
+  <ul>
+    <li><code>RateLimit-Limit</code>: requests allowed per window (e.g. <code>10</code>)</li>
+    <li><code>RateLimit-Remaining</code>: requests still available right now (e.g. <code>9</code>)</li>
+    <li><code>RateLimit-Reset</code>: seconds until the quota is fully replenished (e.g. <code>1</code>)</li>
+    <li><code>RateLimit</code>: the same state in IETF draft syntax — <code>"default";r=9;t=1</code></li>
+    <li><code>RateLimit-Policy</code>: the policy in force — <code>"default";q=10;w=1</code> (quota 10, window 1s). Sent on every response.</li>
+    <li><code>Retry-After</code>: seconds to wait, sent with <code>429</code> responses</li>
+  </ul>
+  <div class="warning">
+    <p>GitHub's own upstream quota is passed through unchanged as <code>X-RateLimit-*</code>. Those headers describe GitHub's limit on the donated token that served your request; the <code>RateLimit-*</code> headers above describe <em>this proxy's</em> limit on your key.</p>
+  </div>
+
+  <pre><code>curl -sD- -o /dev/null -H "X-API-Key: your_key" {{.BaseURL}}/gh/rate_limit
+
+RateLimit-Limit: 10
+RateLimit-Remaining: 9
+RateLimit-Reset: 1
+RateLimit-Policy: "default";q=10;w=1
+RateLimit: "default";r=9;t=1</code></pre>
 
   <h2>🗄️ Caching</h2>
   <p>Responses are automatically cached to improve performance:</p>
@@ -155,11 +178,39 @@ response = requests.post('{{.BaseURL}}/gh/graphql',
 data = response.json()</code></pre>
 
   <h2>⚠️ Error Responses</h2>
+  <p>Every error this proxy generates is JSON, never an HTML page. The envelope is stable:</p>
+  <pre><code>{
+  "error": {
+    "code": "RATE_LIMIT_EXCEEDED",
+    "message": "Rate limit exceeded",
+    "hint": "This key allows 10 requests/second; retry after 1 second(s) and back off exponentially",
+    "documentation_url": "{{.BaseURL}}/docs"
+  }
+}</code></pre>
+  <p>Branch on <code>error.code</code> — it is stable. <code>message</code> and <code>hint</code> are for humans and logs.
+  <code>404</code> and <code>405</code> responses also carry an <code>error.links</code> array pointing at the entry points of this service.</p>
+
+  <h3>Status codes and error codes</h3>
   <ul>
-    <li><code>401 Unauthorized</code>: Missing or invalid API key</li>
-    <li><code>403 Forbidden</code>: API key disabled or insufficient permissions</li>
-    <li><code>413 Request Entity Too Large</code>: Request body too large (max 1MB)</li>
-    <li><code>429 Too Many Requests</code>: Rate limit exceeded</li>
+    <li><code>401</code> <code>MISSING_API_KEY</code>: no <code>X-API-Key</code> header was sent</li>
+    <li><code>401</code> <code>INVALID_API_KEY</code>: the key is not recognised</li>
+    <li><code>403</code> <code>API_KEY_DISABLED</code>: the key exists but was disabled by an administrator</li>
+    <li><code>404</code> <code>NOT_FOUND</code>: no such path on this proxy</li>
+    <li><code>405</code> <code>METHOD_NOT_ALLOWED</code>: the path exists but does not accept that method</li>
+    <li><code>413</code> <code>REQUEST_TOO_LARGE</code>: request body too large (max 1MB)</li>
+    <li><code>429</code> <code>RATE_LIMIT_EXCEEDED</code>: rate limit exceeded — see <code>Retry-After</code></li>
+    <li><code>503</code> <code>DB_ERROR</code>: the key could not be verified; transient, retry with backoff</li>
+  </ul>
+  <div class="warning">
+    <p>Any other status on a <code>/gh/</code> request is GitHub's own response, forwarded verbatim. A <code>404</code> from <code>/gh/repos/does/not-exist</code> is GitHub's 404, with GitHub's body.</p>
+  </div>
+
+  <h2>🤖 For Agents</h2>
+  <ul>
+    <li><a href="/llms.txt"><code>/llms.txt</code></a>: machine-readable site map in the <a href="https://llmstxt.org">llmstxt.org</a> format</li>
+    <li><a href="/openapi.json"><code>/openapi.json</code></a>: OpenAPI 3.0.3 specification for every endpoint, header and error shape</li>
+    <li><a href="/sitemap.xml"><code>/sitemap.xml</code></a> and <a href="/robots.txt"><code>/robots.txt</code></a></li>
+    <li>Unknown paths return a real <code>404</code>. Send <code>Accept: application/json</code> for the JSON envelope; anything else gets a short markdown document listing where to go next.</li>
   </ul>
 
   <h2>💡 Tips & Best Practices</h2>
@@ -176,6 +227,8 @@ data = response.json()</code></pre>
   
   <div class="nav">
     <a href="/">← Back to Home</a>
+    <a href="/openapi.json">OpenAPI Spec</a>
+    <a href="/llms.txt">llms.txt</a>
     <a href="/admin">Admin Panel</a>
   </div>
 </body>

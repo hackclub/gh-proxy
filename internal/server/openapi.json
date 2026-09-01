@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "gh-proxy API",
-    "description": "A GitHub API proxy service that provides rate limiting, caching, and token pooling for GitHub API requests.",
+    "description": "A GitHub API proxy service that provides rate limiting, caching, and token pooling for GitHub API requests.\n\n**Errors.** Every error from this service is a JSON document shaped like `{\"error\":{\"code\":\"...\",\"message\":\"...\",\"hint\":\"...\",\"documentation_url\":\"...\"}}`. `code` is a stable machine-readable identifier, `hint` says how to recover. Unknown paths return `404` with either that JSON body (when the request targets an API path or sends `Accept: application/json`) or a short markdown body linking to `/llms.txt`, `/openapi.json` and `/docs`.\n\n**Rate limits.** Each API key has its own quota, 10 requests/second by default, over a one-second window. Every response carries `RateLimit-Policy`; `/gh/*` responses also carry live counters in `RateLimit`, `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`, and a `429` adds `Retry-After`. `RateLimit-Limit`/`-Remaining`/`-Reset` follow the widely deployed convention; `RateLimit`/`RateLimit-Policy` follow the IETF `draft-ietf-httpapi-ratelimit-headers` syntax (`\"default\";r=9;t=1` and `\"default\";q=10;w=1`). Note that GitHub's own upstream quota is passed through separately as `X-RateLimit-*`.",
     "version": "1.0.0",
     "contact": {
       "name": "Hack Club"
@@ -15,11 +15,72 @@
     }
   ],
   "paths": {
+    "/": {
+      "get": {
+        "operationId": "getHomePage",
+        "summary": "Project home page",
+        "description": "Human-readable landing page describing the proxy and the token donation flow.",
+        "tags": [
+          "Discovery"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Project home page",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          }
+        }
+      }
+    },
+    "/docs": {
+      "get": {
+        "operationId": "getDocs",
+        "summary": "API documentation",
+        "description": "Human-readable documentation: endpoints, authentication, caching, rate limit headers and error codes.",
+        "tags": [
+          "Discovery"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "API documentation",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          }
+        }
+      }
+    },
     "/openapi.json": {
       "get": {
+        "operationId": "getOpenAPISpec",
         "summary": "Get OpenAPI specification",
         "description": "Returns the OpenAPI specification for this API.",
-        "tags": ["System"],
+        "tags": [
+          "Discovery"
+        ],
         "responses": {
           "200": {
             "description": "OpenAPI specification document",
@@ -30,15 +91,113 @@
                 }
               }
             }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          }
+        },
+        "security": []
+      }
+    },
+    "/llms.txt": {
+      "get": {
+        "operationId": "getLLMsTxt",
+        "summary": "Agent site map (llms.txt)",
+        "description": "Machine-readable summary of the site in the llmstxt.org format: what the service does, where the docs are, and which endpoints exist.",
+        "tags": [
+          "Discovery"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Agent site map (llms.txt)",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string",
+                  "example": "# gh-proxy\n\n> A Hack Club GitHub API proxy...\n"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          }
+        }
+      }
+    },
+    "/robots.txt": {
+      "get": {
+        "operationId": "getRobotsTxt",
+        "summary": "Crawler policy",
+        "description": "robots.txt. Points at the sitemap and excludes authenticated paths.",
+        "tags": [
+          "Discovery"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Crawler policy",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          }
+        }
+      }
+    },
+    "/sitemap.xml": {
+      "get": {
+        "operationId": "getSitemap",
+        "summary": "XML sitemap",
+        "description": "sitemaps.org 0.9 sitemap listing the publicly crawlable documents.",
+        "tags": [
+          "Discovery"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "XML sitemap",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
           }
         }
       }
     },
     "/gh/{path}": {
       "get": {
+        "operationId": "proxyGitHubRESTGet",
         "summary": "Proxy GitHub REST API endpoint",
         "description": "Proxy any GitHub REST API endpoint with authentication, rate limiting, and caching.",
-        "tags": ["GitHub API"],
+        "tags": [
+          "GitHub API"
+        ],
         "parameters": [
           {
             "name": "path",
@@ -59,34 +218,75 @@
                   "type": "object"
                 }
               }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid API key",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
+            },
+            "headers": {
+              "RateLimit": {
+                "$ref": "#/components/headers/RateLimit"
+              },
+              "RateLimit-Policy": {
+                "$ref": "#/components/headers/RateLimit-Policy"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimit-Limit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimit-Remaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimit-Reset"
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
           "429": {
-            "description": "Rate limit exceeded",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "502": {
+            "$ref": "#/components/responses/BadGateway"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "default": {
+            "description": "Any other status is GitHub's own response, passed through verbatim (headers and body) along with this proxy's RateLimit-* and X-Gh-Proxy-* headers.",
+            "headers": {
+              "RateLimit": {
+                "$ref": "#/components/headers/RateLimit"
+              },
+              "RateLimit-Policy": {
+                "$ref": "#/components/headers/RateLimit-Policy"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimit-Limit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimit-Remaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimit-Reset"
               }
             }
           }
         }
       },
       "post": {
+        "operationId": "proxyGitHubRESTPost",
         "summary": "Proxy GitHub REST API with body",
         "description": "Proxy GitHub REST API endpoints that require request body.",
-        "tags": ["GitHub API"],
+        "tags": [
+          "GitHub API"
+        ],
         "parameters": [
           {
             "name": "path",
@@ -99,15 +299,63 @@
         ],
         "responses": {
           "200": {
-            "description": "GitHub API response"
+            "description": "GitHub API response",
+            "headers": {
+              "RateLimit": {
+                "$ref": "#/components/headers/RateLimit"
+              },
+              "RateLimit-Policy": {
+                "$ref": "#/components/headers/RateLimit-Policy"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimit-Limit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimit-Remaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimit-Reset"
+              }
+            }
           },
           "401": {
-            "description": "Missing or invalid API key",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "502": {
+            "$ref": "#/components/responses/BadGateway"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "default": {
+            "description": "Any other status is GitHub's own response, passed through verbatim (headers and body) along with this proxy's RateLimit-* and X-Gh-Proxy-* headers.",
+            "headers": {
+              "RateLimit": {
+                "$ref": "#/components/headers/RateLimit"
+              },
+              "RateLimit-Policy": {
+                "$ref": "#/components/headers/RateLimit-Policy"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimit-Limit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimit-Remaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimit-Reset"
               }
             }
           }
@@ -116,9 +364,12 @@
     },
     "/gh/graphql": {
       "post": {
+        "operationId": "proxyGitHubGraphQL",
         "summary": "Proxy GitHub GraphQL API",
         "description": "Proxy GitHub GraphQL API endpoint.",
-        "tags": ["GitHub API"],
+        "tags": [
+          "GitHub API"
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -135,7 +386,9 @@
                     "description": "GraphQL variables"
                   }
                 },
-                "required": ["query"]
+                "required": [
+                  "query"
+                ]
               }
             }
           }
@@ -160,25 +413,63 @@
                   }
                 }
               }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid API key",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
+            },
+            "headers": {
+              "RateLimit": {
+                "$ref": "#/components/headers/RateLimit"
+              },
+              "RateLimit-Policy": {
+                "$ref": "#/components/headers/RateLimit-Policy"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimit-Limit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimit-Remaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimit-Reset"
               }
             }
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
           "429": {
-            "description": "Rate limit exceeded",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "502": {
+            "$ref": "#/components/responses/BadGateway"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "default": {
+            "description": "Any other status is GitHub's own response, passed through verbatim (headers and body) along with this proxy's RateLimit-* and X-Gh-Proxy-* headers.",
+            "headers": {
+              "RateLimit": {
+                "$ref": "#/components/headers/RateLimit"
+              },
+              "RateLimit-Policy": {
+                "$ref": "#/components/headers/RateLimit-Policy"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimit-Limit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimit-Remaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimit-Reset"
               }
             }
           }
@@ -190,16 +481,36 @@
     "schemas": {
       "Error": {
         "type": "object",
-        "required": ["error"],
+        "required": [
+          "error"
+        ],
         "properties": {
           "error": {
             "type": "object",
-            "required": ["code", "message"],
+            "required": [
+              "code",
+              "message"
+            ],
             "properties": {
               "code": {
                 "type": "string",
                 "description": "Machine-readable error code",
-                "enum": ["MISSING_API_KEY", "INVALID_API_KEY", "API_KEY_DISABLED", "RATE_LIMIT_EXCEEDED", "REQUEST_TOO_LARGE", "INTERNAL_ERROR", "INVALID_REQUEST", "CSRF_FAILED", "DB_ERROR"]
+                "enum": [
+                  "UNAUTHORIZED",
+                  "MISSING_API_KEY",
+                  "INVALID_API_KEY",
+                  "API_KEY_DISABLED",
+                  "RATE_LIMIT_EXCEEDED",
+                  "REQUEST_TOO_LARGE",
+                  "INTERNAL_ERROR",
+                  "INVALID_REQUEST",
+                  "CSRF_FAILED",
+                  "DB_ERROR",
+                  "MISSING_FIELDS",
+                  "NOT_FOUND",
+                  "METHOD_NOT_ALLOWED",
+                  "UPSTREAM_ERROR"
+                ]
               },
               "message": {
                 "type": "string",
@@ -207,7 +518,37 @@
               },
               "hint": {
                 "type": "string",
-                "description": "Optional hint for resolving the error"
+                "description": "How to resolve the error"
+              },
+              "documentation_url": {
+                "type": "string",
+                "format": "uri",
+                "description": "Link to the human-readable API documentation",
+                "example": "https://gh-proxy.hackclub.com/docs"
+              },
+              "links": {
+                "type": "array",
+                "description": "Places to look next. Present on 404 and 405 responses.",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "rel",
+                    "href"
+                  ],
+                  "properties": {
+                    "rel": {
+                      "type": "string",
+                      "example": "service-desc"
+                    },
+                    "href": {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    "description": {
+                      "type": "string"
+                    }
+                  }
+                }
               }
             }
           }
@@ -221,11 +562,252 @@
         "name": "X-API-Key",
         "description": "API key required for all GitHub proxy endpoints"
       }
+    },
+    "headers": {
+      "RateLimit": {
+        "description": "Live quota for the current window, IETF draft syntax: policy name, r=remaining, t=seconds until the quota is replenished.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "\"default\";r=9;t=1"
+      },
+      "RateLimit-Policy": {
+        "description": "The quota policy in force, IETF draft syntax: policy name, q=quota, w=window in seconds.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "\"default\";q=10;w=1"
+      },
+      "RateLimit-Limit": {
+        "description": "Requests allowed per window for this API key.",
+        "schema": {
+          "type": "integer"
+        },
+        "example": 10
+      },
+      "RateLimit-Remaining": {
+        "description": "Requests still available to this API key right now.",
+        "schema": {
+          "type": "integer"
+        },
+        "example": 9
+      },
+      "RateLimit-Reset": {
+        "description": "Seconds until the quota is fully replenished.",
+        "schema": {
+          "type": "integer"
+        },
+        "example": 1
+      },
+      "Retry-After": {
+        "description": "Seconds to wait before retrying. Sent with 429 responses.",
+        "schema": {
+          "type": "integer"
+        },
+        "example": 1
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Missing (MISSING_API_KEY) or unknown (INVALID_API_KEY) API key. Admin endpoints use UNAUTHORIZED for missing HTTP Basic credentials.",
+        "headers": {
+          "RateLimit": {
+            "$ref": "#/components/headers/RateLimit"
+          },
+          "RateLimit-Policy": {
+            "$ref": "#/components/headers/RateLimit-Policy"
+          },
+          "RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimit-Limit"
+          },
+          "RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimit-Remaining"
+          },
+          "RateLimit-Reset": {
+            "$ref": "#/components/headers/RateLimit-Reset"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The API key exists but is disabled (API_KEY_DISABLED).",
+        "headers": {
+          "RateLimit": {
+            "$ref": "#/components/headers/RateLimit"
+          },
+          "RateLimit-Policy": {
+            "$ref": "#/components/headers/RateLimit-Policy"
+          },
+          "RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimit-Limit"
+          },
+          "RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimit-Remaining"
+          },
+          "RateLimit-Reset": {
+            "$ref": "#/components/headers/RateLimit-Reset"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "PayloadTooLarge": {
+        "description": "Request body exceeds the configured maximum (REQUEST_TOO_LARGE).",
+        "headers": {
+          "RateLimit": {
+            "$ref": "#/components/headers/RateLimit"
+          },
+          "RateLimit-Policy": {
+            "$ref": "#/components/headers/RateLimit-Policy"
+          },
+          "RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimit-Limit"
+          },
+          "RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimit-Remaining"
+          },
+          "RateLimit-Reset": {
+            "$ref": "#/components/headers/RateLimit-Reset"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "TooManyRequests": {
+        "description": "Per-key rate limit exceeded (RATE_LIMIT_EXCEEDED). Wait Retry-After seconds, then back off exponentially.",
+        "headers": {
+          "RateLimit": {
+            "$ref": "#/components/headers/RateLimit"
+          },
+          "RateLimit-Policy": {
+            "$ref": "#/components/headers/RateLimit-Policy"
+          },
+          "RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimit-Limit"
+          },
+          "RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimit-Remaining"
+          },
+          "RateLimit-Reset": {
+            "$ref": "#/components/headers/RateLimit-Reset"
+          },
+          "Retry-After": {
+            "$ref": "#/components/headers/Retry-After"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "ServiceUnavailable": {
+        "description": "The API key could not be verified because of a transient backend failure (DB_ERROR). Retry with backoff.",
+        "headers": {
+          "RateLimit": {
+            "$ref": "#/components/headers/RateLimit"
+          },
+          "RateLimit-Policy": {
+            "$ref": "#/components/headers/RateLimit-Policy"
+          },
+          "RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimit-Limit"
+          },
+          "RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimit-Remaining"
+          },
+          "RateLimit-Reset": {
+            "$ref": "#/components/headers/RateLimit-Reset"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "No such path (NOT_FOUND). The body lists entry points in error.links. Requests that do not ask for JSON receive the same information as a short markdown document.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "MethodNotAllowed": {
+        "description": "The path exists but does not accept this method (METHOD_NOT_ALLOWED).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "BadGateway": {
+        "description": "The proxy could not reach the GitHub API (UPSTREAM_ERROR): no usable donated token, or a network/timeout failure. Retry with backoff.",
+        "headers": {
+          "RateLimit": {
+            "$ref": "#/components/headers/RateLimit"
+          },
+          "RateLimit-Policy": {
+            "$ref": "#/components/headers/RateLimit-Policy"
+          },
+          "RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimit-Limit"
+          },
+          "RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimit-Remaining"
+          },
+          "RateLimit-Reset": {
+            "$ref": "#/components/headers/RateLimit-Reset"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
     }
   },
   "security": [
     {
       "ApiKeyAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Discovery",
+      "description": "Unauthenticated documents describing this service"
+    },
+    {
+      "name": "GitHub API",
+      "description": "Authenticated GitHub REST and GraphQL proxy"
     }
   ]
 }

@@ -20,7 +20,7 @@ SELECT k.id::text,
        k.disabled
 FROM api_keys k
 ORDER BY k.created_at DESC`)
-	if err != nil { http.Error(w, err.Error(), 500); return }
+	if err != nil { s.jsonError(w, "DB_ERROR", "Failed to query the database", err.Error(), 500); return }
 	defer rows.Close()
 	type row struct {
 		ID string `json:"id"`
@@ -37,7 +37,7 @@ ORDER BY k.created_at DESC`)
 		var hitRate float64
 		var lastUsed *time.Time
 		var disabled bool
-		if err := rows.Scan(&id, &hc, &app, &machine, &hint, &total, &hitRate, &lastUsed, &disabled); err!=nil { http.Error(w, err.Error(), 500); return }
+		if err := rows.Scan(&id, &hc, &app, &machine, &hint, &total, &hitRate, &lastUsed, &disabled); err!=nil { s.jsonError(w, "DB_ERROR", "Failed to read a database row", err.Error(), 500); return }
 		out = append(out, row{ID: id, Display: formatKeyDisplay(hc, app, machine, hint), Total: total, HitRate: hitRate, LastUsed: lastUsed, Disabled: disabled})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -59,7 +59,7 @@ LEFT JOIN request_logs rl ON rl.api_key=k.key_hash AND rl.created_at::date = d.d
 GROUP BY k.id, d.d
 ORDER BY k.id, d.d;
 `)
-	if err != nil { http.Error(w, err.Error(), 500); return }
+	if err != nil { s.jsonError(w, "DB_ERROR", "Failed to query the database", err.Error(), 500); return }
 	defer rows.Close()
 	type point struct{ Day string `json:"day"`; C int64 `json:"c"` }
 	m := map[string][]point{}
@@ -67,7 +67,7 @@ ORDER BY k.id, d.d;
 		var id string
 		var day time.Time
 		var c int64
-		if err := rows.Scan(&id, &day, &c); err != nil { http.Error(w, err.Error(), 500); return }
+		if err := rows.Scan(&id, &day, &c); err != nil { s.jsonError(w, "DB_ERROR", "Failed to read a database row", err.Error(), 500); return }
 		m[id] = append(m[id], point{Day: day.Format("2006-01-02"), C: c})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -86,11 +86,11 @@ FROM request_logs rl
 LEFT JOIN api_keys ak ON ak.key_hash = rl.api_key
 ORDER BY rl.id DESC
 LIMIT 1000`)
-	if err != nil { http.Error(w, err.Error(), 500); return }
+	if err != nil { s.jsonError(w, "DB_ERROR", "Failed to query the database", err.Error(), 500); return }
 	defer rows.Close()
 	type row struct{ Method string `json:"method"`; Path string `json:"path"`; Status int `json:"status"`; CreatedAt time.Time `json:"created_at"`; Display string `json:"display"` }
 	var out []row
-	for rows.Next() { var rr row; if err := rows.Scan(&rr.Method, &rr.Path, &rr.Status, &rr.CreatedAt, &rr.Display); err!=nil { http.Error(w, err.Error(), 500); return }; out = append(out, rr) }
+	for rows.Next() { var rr row; if err := rows.Scan(&rr.Method, &rr.Path, &rr.Status, &rr.CreatedAt, &rr.Display); err!=nil { s.jsonError(w, "DB_ERROR", "Failed to read a database row", err.Error(), 500); return }; out = append(out, rr) }
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }

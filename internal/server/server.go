@@ -16,6 +16,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"gh-proxy/internal/cache"
@@ -64,11 +66,22 @@ func New(pool *pgxpool.Pool, cfg config.Config) *Server {
 	go s.hub.run()
 	go s.cacheJanitor()
 
+	s.Router = s.routes()
+	return s
+}
+
+// routes builds the HTTP router. Kept separate from New so it can be
+// exercised without a database.
+func (s *Server) routes() *mux.Router {
 	r := mux.NewRouter()
 	r.Use(s.requestLogger)
-	r.HandleFunc("/", s.handleIndex).Methods("GET")
-	r.HandleFunc("/docs", s.handleDocs).Methods("GET")
-	r.HandleFunc("/openapi.json", s.handleOpenAPI).Methods("GET")
+	r.Use(s.rateLimitPolicyHeader)
+	r.HandleFunc("/", s.handleIndex).Methods("GET", "HEAD")
+	r.HandleFunc("/docs", s.handleDocs).Methods("GET", "HEAD")
+	r.HandleFunc("/openapi.json", s.handleOpenAPI).Methods("GET", "HEAD")
+	r.HandleFunc("/llms.txt", s.handleLLMsTxt).Methods("GET", "HEAD")
+	r.HandleFunc("/robots.txt", s.handleRobotsTxt).Methods("GET", "HEAD")
+	r.HandleFunc("/sitemap.xml", s.handleSitemap).Methods("GET", "HEAD")
 	r.HandleFunc("/auth/github/login", s.handleGitHubLogin).Methods("GET")
 	// support POST /auth/github to mimic provided form
 	r.HandleFunc("/auth/github", s.handleGitHubLogin).Methods("POST")
@@ -87,8 +100,18 @@ func New(pool *pgxpool.Pool, cfg config.Config) *Server {
 	r.HandleFunc("/gh/{rest:.*}", s.handleProxyREST)
 	r.HandleFunc("/gh/graphql", s.handleProxyGraphQL)
 
-	s.Router = r
-	return s
+	// Unknown paths and wrong methods still get an actionable, machine
+	// readable body instead of Go's bare "404 page not found".
+	r.NotFoundHandler = s.wrapMiddleware(http.HandlerFunc(s.handleNotFound))
+	r.MethodNotAllowedHandler = s.wrapMiddleware(http.HandlerFunc(s.handleMethodNotAllowed))
+
+	return r
+}
+
+// wrapMiddleware applies the router-level middleware to handlers gorilla/mux
+// invokes outside the normal match path (NotFound / MethodNotAllowed).
+func (s *Server) wrapMiddleware(h http.Handler) http.Handler {
+	return s.requestLogger(s.rateLimitPolicyHeader(h))
 }
 
 func (s *Server) cacheJanitor() {
@@ -107,6 +130,10 @@ func (s *Server) basicAuth(next http.Handler) http.Handler {
 			subtle.ConstantTimeCompare([]byte(user), []byte(s.cfg.AdminUser)) != 1 ||
 			subtle.ConstantTimeCompare([]byte(pass), []byte(s.cfg.AdminPass)) != 1 {
 			w.Header().Set("WWW-Authenticate", "Basic realm=Restricted")
+			if wantsJSON(r) {
+				s.jsonError(w, "UNAUTHORIZED", "Admin authentication required", "Send HTTP Basic credentials for the admin user", http.StatusUnauthorized)
+				return
+			}
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte("Unauthorized"))
 			return
@@ -190,7 +217,7 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 	machine := r.FormValue("machine")
 	rl := r.FormValue("rate_limit")
 	if hc==""||app==""||machine=="" { s.jsonError(w, "MISSING_FIELDS", "Missing required fields", "Provide hc_username, app_name, and machine", 400); return }
-	per := 10
+	per := defaultRateLimitPerSec
 	if rl != "" { if x, err := strconv.Atoi(rl); err==nil && x>0 { per = x } }
 	prefix := fmt.Sprintf("%s_%s_%s_", hc, app, machine)
 	suffix := randString(24)
@@ -230,17 +257,45 @@ func (s *Server) handleProxyGraphQL(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target string) {
 	apiKey := parseAPIKey(r.Header.Get("X-API-Key"))
-	if apiKey == "" { s.jsonError(w, "MISSING_API_KEY", "Missing X-API-Key header", "Include your API key in the X-API-Key header", 401); return }
+	if apiKey == "" {
+		setRateLimitHeaders(w.Header(), defaultRateLimitState())
+		s.jsonError(w, "MISSING_API_KEY", "Missing X-API-Key header", "Include your API key in the X-API-Key header", 401)
+		return
+	}
 	// rate limit and disabled check
 	var disabled bool
 	var perSec int
 	apiKeyHash := sha256Hex(apiKey)
-	_ = s.pool.QueryRow(r.Context(), `SELECT disabled, rate_limit_per_sec FROM api_keys WHERE key_hash=$1`, apiKeyHash).Scan(&disabled, &perSec)
-	if disabled { log.Printf("deny disabled key: %s", maskKey(apiKey)); s.jsonError(w, "API_KEY_DISABLED", "API key disabled", "Contact an administrator to re-enable your key", 403); return }
-	if !s.ratelimit.Allow(apiKeyHash, perSec) { log.Printf("429 rate limit for key %s", maskKey(apiKey)); s.jsonError(w, "RATE_LIMIT_EXCEEDED", "Rate limit exceeded", "Implement exponential backoff and retry after a delay", 429); return }
+	err := s.pool.QueryRow(r.Context(), `SELECT disabled, rate_limit_per_sec FROM api_keys WHERE key_hash=$1`, apiKeyHash).Scan(&disabled, &perSec)
+	if errors.Is(err, pgx.ErrNoRows) {
+		log.Printf("deny unknown key: %s", maskKey(apiKey))
+		setRateLimitHeaders(w.Header(), defaultRateLimitState())
+		s.jsonError(w, "INVALID_API_KEY", "Unknown API key", "Check the X-API-Key header value, or ask an administrator for a key", 401)
+		return
+	}
+	if err != nil {
+		log.Printf("api key lookup failed: %v", err)
+		s.jsonError(w, "DB_ERROR", "Could not verify the API key", "Transient server error; retry with backoff", http.StatusServiceUnavailable)
+		return
+	}
+	if disabled {
+		log.Printf("deny disabled key: %s", maskKey(apiKey))
+		setRateLimitHeaders(w.Header(), rateLimitState{Limit: perSec, Remaining: 0, Reset: 0})
+		s.jsonError(w, "API_KEY_DISABLED", "API key disabled", "Contact an administrator to re-enable your key", 403)
+		return
+	}
+	allowed, rlState := s.ratelimit.Allow(apiKeyHash, perSec)
+	if !allowed {
+		log.Printf("429 rate limit for key %s", maskKey(apiKey))
+		setRateLimitHeaders(w.Header(), rlState)
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(rlState)))
+		s.jsonError(w, "RATE_LIMIT_EXCEEDED", "Rate limit exceeded", fmt.Sprintf("This key allows %d requests/second; retry after %d second(s) and back off exponentially", rlState.Limit, retryAfterSeconds(rlState)), 429)
+		return
+	}
 
 	// bound body size for safety (configurable)
 	if r.ContentLength > 0 && s.cfg.MaxProxyBodyBytes > 0 && r.ContentLength > s.cfg.MaxProxyBodyBytes {
+		setRateLimitHeaders(w.Header(), rlState)
 		s.jsonError(w, "REQUEST_TOO_LARGE", "Request body too large", fmt.Sprintf("Maximum allowed size is %d bytes", s.cfg.MaxProxyBodyBytes), http.StatusRequestEntityTooLarge); return
 	}
 	if s.cfg.MaxProxyBodyBytes > 0 {
@@ -259,6 +314,7 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 			// add debug headers
 			w.Header().Set("X-Gh-Proxy-Cache", "hit")
 			w.Header().Set("X-Gh-Proxy-Category", ghCategory(fullTarget))
+			setRateLimitHeaders(w.Header(), rlState)
 			if disp := s.lookupClientDisplay(r.Context(), apiKeyHash); disp != "" { w.Header().Set("X-Gh-Proxy-Client", disp) }
 			w.WriteHeader(status)
 			_, _ = w.Write(cached)
@@ -270,6 +326,15 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 	// Fetch from GitHub and cache
 	status, hdr, respBody, usedToken, err := s.gh.Do(r.Context(), r.Method, fullTarget, body)
 	if err != nil { log.Println("proxy error:", err) }
+	// The upstream call never reached GitHub (no usable donated token, DNS,
+	// TLS, timeout). Report it as a JSON error rather than writing a zero
+	// status, which would abort the connection.
+	if status == 0 {
+		setRateLimitHeaders(w.Header(), rlState)
+		s.jsonError(w, "UPSTREAM_ERROR", "Could not reach the GitHub API", "The proxy could not complete the upstream request; retry with backoff", http.StatusBadGateway)
+		s.afterRequest(r.Context(), apiKeyHash, r.Method, r.URL.Path, http.StatusBadGateway, false)
+		return
+	}
 	// Cache successful, cacheable responses (GitHub API responses are safe to cache even if private)
 	if cacheable && status == http.StatusOK {
 		// Skip caching only if explicitly no-cache or no-store
@@ -283,6 +348,7 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 	// annotate debug headers
 	w.Header().Set("X-Gh-Proxy-Cache", "miss")
 	w.Header().Set("X-Gh-Proxy-Category", ghCategory(fullTarget))
+	setRateLimitHeaders(w.Header(), rlState)
 	if disp := s.lookupClientDisplay(r.Context(), apiKeyHash); disp != "" { w.Header().Set("X-Gh-Proxy-Client", disp) }
 	if usedToken != "" {
 		var user string
@@ -398,13 +464,18 @@ func (s *Server) stats() map[string]any {
 func percent(a, b int64) float64 { if b==0 { return 0 }; return float64(a) * 100 / float64(b) }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
+	s.renderStatus(w, http.StatusOK, name, data)
+}
+
+func (s *Server) renderStatus(w http.ResponseWriter, status int, name string, data any) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	// allow inline script in admin.html (current page uses inline <script>)
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src https: data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.tmpl.ExecuteTemplate(w, name, data); err != nil { http.Error(w, err.Error(), 500) }
+	w.WriteHeader(status)
+	if err := s.tmpl.ExecuteTemplate(w, name, data); err != nil { log.Printf("template %s failed: %v", name, err) }
 }
 
 // utilities
@@ -529,22 +600,95 @@ func (l *loggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, errors.New("hijack not supported")
 }
 
+// errorLink points an agent at somewhere it can recover from an error.
+type errorLink struct {
+	Rel         string `json:"rel"`
+	Href        string `json:"href"`
+	Description string `json:"description,omitempty"`
+}
+
+// errorBody is the single error envelope used by every JSON error response.
+// It is mirrored by components/schemas/Error in openapi.json.
+type errorBody struct {
+	Error struct {
+		Code             string      `json:"code"`
+		Message          string      `json:"message"`
+		Hint             string      `json:"hint,omitempty"`
+		DocumentationURL string      `json:"documentation_url,omitempty"`
+		Links            []errorLink `json:"links,omitempty"`
+	} `json:"error"`
+}
+
 // jsonError writes a structured JSON error response
 func (s *Server) jsonError(w http.ResponseWriter, code, message, hint string, status int) {
+	s.jsonErrorLinks(w, code, message, hint, status, nil)
+}
+
+// jsonErrorLinks writes a structured JSON error response with recovery links.
+func (s *Server) jsonErrorLinks(w http.ResponseWriter, code, message, hint string, status int, links []errorLink) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
-	type resp struct {
-		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-			Hint    string `json:"hint,omitempty"`
-		} `json:"error"`
-	}
-	r := resp{}
+	r := errorBody{}
 	r.Error.Code = code
 	r.Error.Message = message
 	r.Error.Hint = hint
+	r.Error.DocumentationURL = s.docsURL()
+	r.Error.Links = links
 	_ = json.NewEncoder(w).Encode(r)
+}
+
+// Rate limit policy advertised to clients. The window is one second and the
+// quota is the per-key rate_limit_per_sec column (defaultRateLimitPerSec when
+// a key has not overridden it).
+const (
+	defaultRateLimitPerSec = 10
+	rateLimitWindowSeconds = 1
+	rateLimitPolicyName    = "default"
+)
+
+// rateLimitState is a snapshot of a key's quota, rendered into the RFC-style
+// RateLimit response headers.
+type rateLimitState struct {
+	Limit     int // requests allowed per window
+	Remaining int // requests still available right now
+	Reset     int // seconds until the quota is fully replenished
+}
+
+// defaultRateLimitState describes the policy that applies to a request we
+// could not attribute to a key (missing or unknown X-API-Key). No quota was
+// consumed, so the full default allowance is reported.
+func defaultRateLimitState() rateLimitState {
+	return rateLimitState{Limit: defaultRateLimitPerSec, Remaining: defaultRateLimitPerSec, Reset: 0}
+}
+
+// setRateLimitHeaders writes both the widely deployed RateLimit-* triple and
+// the current IETF draft RateLimit / RateLimit-Policy fields, so agents can
+// self-throttle whichever convention they understand.
+func setRateLimitHeaders(h http.Header, st rateLimitState) {
+	if st.Limit <= 0 { return }
+	if st.Remaining < 0 { st.Remaining = 0 }
+	if st.Reset < 0 { st.Reset = 0 }
+	h.Set("RateLimit-Limit", strconv.Itoa(st.Limit))
+	h.Set("RateLimit-Remaining", strconv.Itoa(st.Remaining))
+	h.Set("RateLimit-Reset", strconv.Itoa(st.Reset))
+	h.Set("RateLimit-Policy", fmt.Sprintf("%q;q=%d;w=%d", rateLimitPolicyName, st.Limit, rateLimitWindowSeconds))
+	h.Set("RateLimit", fmt.Sprintf("%q;r=%d;t=%d", rateLimitPolicyName, st.Remaining, st.Reset))
+}
+
+// retryAfterSeconds is the Retry-After value to pair with a 429.
+func retryAfterSeconds(st rateLimitState) int {
+	if st.Reset > 0 { return st.Reset }
+	return rateLimitWindowSeconds
+}
+
+// rateLimitPolicyHeader advertises the API rate limit policy on every
+// response. Live counters are added per request by serveProxy.
+func (s *Server) rateLimitPolicyHeader(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("RateLimit-Policy", fmt.Sprintf("%q;q=%d;w=%d", rateLimitPolicyName, defaultRateLimitPerSec, rateLimitWindowSeconds))
+		next.ServeHTTP(w, r)
+	})
 }
 
 // simple in-memory token bucket per API key
@@ -561,23 +705,40 @@ type bucket struct {
 
 func newRateLimiter() *rateLimiter { return &rateLimiter{buckets: make(map[string]*bucket)} }
 
-func (rl *rateLimiter) Allow(key string, perSec int) bool {
+// Allow consumes one token for key and reports whether the request may
+// proceed, along with the resulting quota snapshot.
+func (rl *rateLimiter) Allow(key string, perSec int) (bool, rateLimitState) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	if perSec <= 0 { return false } // do not create buckets for invalid/disabled keys
+	if perSec <= 0 { return false, rateLimitState{} } // do not create buckets for invalid/disabled keys
 	b := rl.buckets[key]
 	if b == nil { b = &bucket{capacity: perSec, tokens: float64(perSec), last: time.Now()}; rl.buckets[key] = b }
+	// a key's configured limit can change while its bucket is alive
+	if b.capacity != perSec {
+		b.capacity = perSec
+		if b.tokens > float64(perSec) { b.tokens = float64(perSec) }
+	}
 	// refill
 	now := time.Now()
 	dt := now.Sub(b.last).Seconds()
 	b.last = now
 	b.tokens += dt * float64(perSec)
 	if b.tokens > float64(b.capacity) { b.tokens = float64(b.capacity) }
-	if b.tokens >= 1 {
-		b.tokens -= 1
-		return true
+	allowed := b.tokens >= 1
+	if allowed { b.tokens -= 1 }
+	return allowed, b.state()
+}
+
+// state snapshots the bucket. Reset is how long until the bucket is full
+// again, rounded up to whole seconds.
+func (b *bucket) state() rateLimitState {
+	remaining := int(math.Floor(b.tokens))
+	if remaining < 0 { remaining = 0 }
+	reset := 0
+	if rate := float64(b.capacity); rate > 0 && b.tokens < rate {
+		reset = int(math.Ceil((rate - b.tokens) / rate))
 	}
-	return false
+	return rateLimitState{Limit: b.capacity, Remaining: remaining, Reset: reset}
 }
 
 // CSRF helpers for admin (double-submit cookie)

@@ -133,6 +133,49 @@ Migrations run automatically at startup.
 
 All API requests require `X-API-Key: <your key>`.
 
+### Machine‑readable
+
+* **OpenAPI**: `/openapi.json` — OpenAPI 3.0.3 description of every endpoint, header and error shape.
+* **llms.txt**: `/llms.txt` — site map for agents, in the [llmstxt.org](https://llmstxt.org) format.
+* **Sitemap**: `/sitemap.xml`, **Crawler policy**: `/robots.txt`
+
+---
+
+## Errors and rate limit headers
+
+Every error this proxy generates is JSON, never an HTML page:
+
+```json
+{
+  "error": {
+    "code": "RATE_LIMIT_EXCEEDED",
+    "message": "Rate limit exceeded",
+    "hint": "This key allows 10 requests/second; retry after 1 second(s) and back off exponentially",
+    "documentation_url": "https://gh-proxy.hackclub.com/docs"
+  }
+}
+```
+
+Branch on `error.code` — it is stable and enumerated in `openapi.json`. `404` and `405` responses
+add an `error.links` array pointing at the entry points above. Unknown paths return a real `404`:
+JSON for API paths or `Accept: application/json`, HTML for browsers, and a short markdown document
+for everything else. Any other status on `/gh/*` is GitHub's own response, forwarded verbatim.
+
+Every `/gh/*` response reports your live quota so clients can self‑throttle without waiting for a 429:
+
+```
+RateLimit-Limit: 10
+RateLimit-Remaining: 9
+RateLimit-Reset: 1
+RateLimit-Policy: "default";q=10;w=1
+RateLimit: "default";r=9;t=1
+```
+
+`RateLimit-Limit`/`-Remaining`/`-Reset` follow the widely deployed convention; `RateLimit` and
+`RateLimit-Policy` follow the IETF `draft-ietf-httpapi-ratelimit-headers` syntax. A `429` adds
+`Retry-After`. `RateLimit-Policy` is sent on every response, so the policy is discoverable without
+spending a request. GitHub's own upstream quota is passed through separately as `X-RateLimit-*`.
+
 ---
 
 ## How it works (one‑minute version)
@@ -165,7 +208,9 @@ docker run --rm -p 8080:8080 --env-file .env \
 
 * **OAuth login fails / admin live stats don’t update:** Ensure `BASE_URL` exactly matches the public origin (scheme + hostname + port).
 * **“missing X-API-Key” (401):** Include your API key header on `/gh/*` requests.
-* **429 Too Many Requests:** Your key hit its per‑second rate limit; lower concurrency or request fewer times per second.
+* **429 Too Many Requests:** Your key hit its per‑second rate limit; lower concurrency or request fewer times per second. Read `RateLimit-Remaining` and `Retry-After` to pace requests.
+* **401 `INVALID_API_KEY`:** The key was sent but is not in the database. Check for whitespace or a truncated value.
+* **502 `UPSTREAM_ERROR`:** The proxy could not reach GitHub — usually no usable donated token. Retry with backoff.
 * **413 Request Entity Too Large:** Increase `MAX_PROXY_BODY_BYTES` if you need to send larger GraphQL payloads.
 
 ---
