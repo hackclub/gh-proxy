@@ -1,0 +1,231 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "gh-proxy API",
+    "description": "A GitHub API proxy service that provides rate limiting, caching, and token pooling for GitHub API requests.",
+    "version": "1.0.0",
+    "contact": {
+      "name": "Hack Club"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://gh-proxy.hackclub.com",
+      "description": "Production server"
+    }
+  ],
+  "paths": {
+    "/openapi.json": {
+      "get": {
+        "summary": "Get OpenAPI specification",
+        "description": "Returns the OpenAPI specification for this API.",
+        "tags": ["System"],
+        "responses": {
+          "200": {
+            "description": "OpenAPI specification document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gh/{path}": {
+      "get": {
+        "summary": "Proxy GitHub REST API endpoint",
+        "description": "Proxy any GitHub REST API endpoint with authentication, rate limiting, and caching.",
+        "tags": ["GitHub API"],
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "description": "GitHub API endpoint path (e.g., 'user', 'repos/octocat/Hello-World')",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "GitHub API response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Proxy GitHub REST API with body",
+        "description": "Proxy GitHub REST API endpoints that require request body.",
+        "tags": ["GitHub API"],
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "GitHub API response"
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gh/graphql": {
+      "post": {
+        "summary": "Proxy GitHub GraphQL API",
+        "description": "Proxy GitHub GraphQL API endpoint.",
+        "tags": ["GitHub API"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string",
+                    "description": "GraphQL query string"
+                  },
+                  "variables": {
+                    "type": "object",
+                    "description": "GraphQL variables"
+                  }
+                },
+                "required": ["query"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "GraphQL response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object"
+                    },
+                    "errors": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Machine-readable error code",
+                "enum": ["MISSING_API_KEY", "INVALID_API_KEY", "API_KEY_DISABLED", "RATE_LIMIT_EXCEEDED", "REQUEST_TOO_LARGE", "INTERNAL_ERROR", "INVALID_REQUEST", "CSRF_FAILED", "DB_ERROR"]
+              },
+              "message": {
+                "type": "string",
+                "description": "Human-readable error message"
+              },
+              "hint": {
+                "type": "string",
+                "description": "Optional hint for resolving the error"
+              }
+            }
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "API key required for all GitHub proxy endpoints"
+      }
+    }
+  },
+  "security": [
+    {
+      "ApiKeyAuth": []
+    }
+  ]
+}

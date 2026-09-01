@@ -14,10 +14,12 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,6 +69,7 @@ func New(pool *pgxpool.Pool, cfg config.Config) *Server {
 	r.Use(s.requestLogger)
 	r.HandleFunc("/", s.handleIndex).Methods("GET")
 	r.HandleFunc("/docs", s.handleDocs).Methods("GET")
+	r.HandleFunc("/openapi.json", s.handleOpenAPI).Methods("GET")
 	r.HandleFunc("/auth/github/login", s.handleGitHubLogin).Methods("GET")
 	// support POST /auth/github to mimic provided form
 	r.HandleFunc("/auth/github", s.handleGitHubLogin).Methods("POST")
@@ -137,6 +140,18 @@ func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "docs.html", data)
 }
 
+func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
+	embedFS := os.DirFS("internal/server")
+	data, err := fs.ReadFile(embedFS, "openapi.json")
+	if err != nil {
+		s.jsonError(w, "INTERNAL_ERROR", "Failed to load OpenAPI specification", "", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
 func humanizeDuration(d time.Duration) string {
 	if d < time.Minute { return "just now" }
 	if d < time.Hour { return fmt.Sprintf("%d minutes ago", int(d.Minutes())) }
@@ -170,13 +185,13 @@ func (s *Server) handleAdminWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil { http.Error(w, err.Error(), 400); return }
-	if !s.checkCSRF(r) { http.Error(w, "bad csrf", 403); return }
+	if err := r.ParseForm(); err != nil { s.jsonError(w, "INVALID_REQUEST", "Failed to parse form data", err.Error(), 400); return }
+	if !s.checkCSRF(r) { s.jsonError(w, "CSRF_FAILED", "Invalid CSRF token", "Please refresh the page and try again", 403); return }
 	hc := r.FormValue("hc_username")
 	app := r.FormValue("app_name")
 	machine := r.FormValue("machine")
 	rl := r.FormValue("rate_limit")
-	if hc==""||app==""||machine=="" { http.Error(w, "missing fields", 400); return }
+	if hc==""||app==""||machine=="" { s.jsonError(w, "MISSING_FIELDS", "Missing required fields", "Provide hc_username, app_name, and machine", 400); return }
 	per := 10
 	if rl != "" { if x, err := strconv.Atoi(rl); err==nil && x>0 { per = x } }
 	prefix := fmt.Sprintf("%s_%s_%s_", hc, app, machine)
@@ -189,7 +204,7 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 	hint := randSeg
 	if len(hint) > 6 { hint = hint[:6] }
 	_, err := s.pool.Exec(r.Context(), `INSERT INTO api_keys(key_hash,key_hint,hc_username,app_name,machine,rate_limit_per_sec) VALUES($1,$2,$3,$4,$5,$6)`, keyHash, hint, hc, app, machine, per)
-	if err != nil { http.Error(w, err.Error(), 500); return }
+	if err != nil { s.jsonError(w, "DB_ERROR", "Failed to create API key", err.Error(), 500); return }
 	log.Printf("created api key for %s/%s on %s: %s", hc, app, machine, maskKey(key))
 	// Show the key once to the admin immediately
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -198,11 +213,11 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDisableAPIKey(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err == nil {
-		if !s.checkCSRF(r) { http.Error(w, "bad csrf", 403); return }
+		if !s.checkCSRF(r) { s.jsonError(w, "CSRF_FAILED", "Invalid CSRF token", "Please refresh the page and try again", 403); return }
 	}
 	id := mux.Vars(r)["id"]
 	_, err := s.pool.Exec(r.Context(), `UPDATE api_keys SET disabled=true WHERE id::text=$1`, id)
-	if err != nil { http.Error(w, err.Error(), 500); return }
+	if err != nil { s.jsonError(w, "DB_ERROR", "Failed to disable API key", err.Error(), 500); return }
 	log.Printf("disabled api key id=%s", id)
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
@@ -217,18 +232,18 @@ func (s *Server) handleProxyGraphQL(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target string) {
 	apiKey := parseAPIKey(r.Header.Get("X-API-Key"))
-	if apiKey == "" { http.Error(w, "missing X-API-Key", 401); return }
+	if apiKey == "" { s.jsonError(w, "MISSING_API_KEY", "Missing X-API-Key header", "Include your API key in the X-API-Key header", 401); return }
 	// rate limit and disabled check
 	var disabled bool
 	var perSec int
 	apiKeyHash := sha256Hex(apiKey)
 	_ = s.pool.QueryRow(r.Context(), `SELECT disabled, rate_limit_per_sec FROM api_keys WHERE key_hash=$1`, apiKeyHash).Scan(&disabled, &perSec)
-	if disabled { log.Printf("deny disabled key: %s", maskKey(apiKey)); http.Error(w, "api key disabled", 403); return }
-	if !s.ratelimit.Allow(apiKeyHash, perSec) { log.Printf("429 rate limit for key %s", maskKey(apiKey)); http.Error(w, "rate limit exceeded", 429); return }
+	if disabled { log.Printf("deny disabled key: %s", maskKey(apiKey)); s.jsonError(w, "API_KEY_DISABLED", "API key disabled", "Contact an administrator to re-enable your key", 403); return }
+	if !s.ratelimit.Allow(apiKeyHash, perSec) { log.Printf("429 rate limit for key %s", maskKey(apiKey)); s.jsonError(w, "RATE_LIMIT_EXCEEDED", "Rate limit exceeded", "Implement exponential backoff and retry after a delay", 429); return }
 
 	// bound body size for safety (configurable)
 	if r.ContentLength > 0 && s.cfg.MaxProxyBodyBytes > 0 && r.ContentLength > s.cfg.MaxProxyBodyBytes {
-		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge); return
+		s.jsonError(w, "REQUEST_TOO_LARGE", "Request body too large", fmt.Sprintf("Maximum allowed size is %d bytes", s.cfg.MaxProxyBodyBytes), http.StatusRequestEntityTooLarge); return
 	}
 	if s.cfg.MaxProxyBodyBytes > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxProxyBodyBytes)
@@ -514,6 +529,24 @@ func (l *loggingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		return hj.Hijack()
 	}
 	return nil, nil, errors.New("hijack not supported")
+}
+
+// jsonError writes a structured JSON error response
+func (s *Server) jsonError(w http.ResponseWriter, code, message, hint string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	type resp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+			Hint    string `json:"hint,omitempty"`
+		} `json:"error"`
+	}
+	r := resp{}
+	r.Error.Code = code
+	r.Error.Message = message
+	r.Error.Hint = hint
+	_ = json.NewEncoder(w).Encode(r)
 }
 
 // simple in-memory token bucket per API key
