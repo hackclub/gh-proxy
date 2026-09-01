@@ -8,7 +8,6 @@ import (
 	"log"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"gh-proxy/internal/config"
@@ -47,16 +46,16 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		b, err := migrationsFS.ReadFile("migrations/"+name)
 		if err != nil { return err }
 		sql := string(b)
-		// split on ; but naive — keep simple migrations
+		// split on ; but naive — keep simple migrations.
+		// Execute statement-by-statement: pgx preprocesses a Batch in full before
+		// running any statement, so a CREATE TABLE followed by an INSERT in the
+		// same file would fail at prepare time ("relation does not exist").
 		stmts := strings.Split(sql, ";")
-		batch := &pgx.Batch{}
 		for _, s := range stmts {
 			s = strings.TrimSpace(s)
 			if s == "" { continue }
-			batch.Queue(s)
+			if _, err := pool.Exec(ctx, s); err != nil { return fmt.Errorf("migration %s: %w", name, err) }
 		}
-		br := pool.SendBatch(ctx, batch)
-		if err := br.Close(); err != nil { return fmt.Errorf("migration %s: %w", name, err) }
 		if _, err := pool.Exec(ctx, `INSERT INTO schema_migrations(name) VALUES($1)`, name); err != nil { return err }
 		log.Printf("migration applied: %s", name)
 	}
