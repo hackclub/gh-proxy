@@ -4,8 +4,8 @@ import (
 	"context"
 	"embed"
 	"fmt"
-	"strings"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
