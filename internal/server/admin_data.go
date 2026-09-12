@@ -17,6 +17,7 @@ SELECT k.id::text,
        k.total_requests AS total,
        CASE WHEN k.total_requests > 0 THEN (k.total_cached_requests::float / k.total_requests::float) * 100 ELSE 0 END AS hit_rate,
        k.last_used_at,
+       k.rate_limit_per_sec,
        k.disabled
 FROM api_keys k
 ORDER BY k.created_at DESC`)
@@ -26,12 +27,13 @@ ORDER BY k.created_at DESC`)
 	}
 	defer rows.Close()
 	type row struct {
-		ID       string     `json:"id"`
-		Display  string     `json:"display"`
-		Total    int64      `json:"total"`
-		HitRate  float64    `json:"hit_rate"`
-		LastUsed *time.Time `json:"last_used"`
-		Disabled bool       `json:"disabled"`
+		ID        string     `json:"id"`
+		Display   string     `json:"display"`
+		Total     int64      `json:"total"`
+		HitRate   float64    `json:"hit_rate"`
+		LastUsed  *time.Time `json:"last_used"`
+		RateLimit int        `json:"rate_limit"`
+		Disabled  bool       `json:"disabled"`
 	}
 	var out []row
 	for rows.Next() {
@@ -39,12 +41,13 @@ ORDER BY k.created_at DESC`)
 		var total int64
 		var hitRate float64
 		var lastUsed *time.Time
+		var rateLimit int
 		var disabled bool
-		if err := rows.Scan(&id, &hc, &app, &machine, &hint, &total, &hitRate, &lastUsed, &disabled); err != nil {
+		if err := rows.Scan(&id, &hc, &app, &machine, &hint, &total, &hitRate, &lastUsed, &rateLimit, &disabled); err != nil {
 			s.jsonError(w, "DB_ERROR", "Failed to read a database row", err.Error(), 500)
 			return
 		}
-		out = append(out, row{ID: id, Display: formatKeyDisplay(hc, app, machine, hint), Total: total, HitRate: hitRate, LastUsed: lastUsed, Disabled: disabled})
+		out = append(out, row{ID: id, Display: formatKeyDisplay(hc, app, machine, hint), Total: total, HitRate: hitRate, LastUsed: lastUsed, RateLimit: rateLimit, Disabled: disabled})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)

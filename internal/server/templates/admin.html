@@ -56,7 +56,7 @@
   </form>
 
   <table>
-    <thead><tr><th>Key</th><th>Total requests</th><th>Cache hit rate</th><th>Last used</th><th>Daily (7d)</th><th>Actions</th></tr></thead>
+    <thead><tr><th>Key</th><th>RPS limit</th><th>Total requests</th><th>Cache hit rate</th><th>Last used</th><th>Daily (7d)</th><th>Actions</th></tr></thead>
     <tbody id="apikeys"></tbody>
   </table>
 
@@ -168,6 +168,7 @@ async function refreshAPIKeys(){
   for (const k of data) {
     const tr = document.createElement('tr');
     const tdKey = document.createElement('td'); tdKey.textContent = k.display; tr.appendChild(tdKey);
+    const tdRateLimit = document.createElement('td'); tdRateLimit.textContent = Number(k.rate_limit).toLocaleString(); tr.appendChild(tdRateLimit);
     const tdTotal = document.createElement('td'); tdTotal.textContent = String(k.total); tr.appendChild(tdTotal);
     const tdHit = document.createElement('td'); tdHit.textContent = (k.hit_rate && k.hit_rate.toFixed) ? k.hit_rate.toFixed(1)+'%' : String(k.hit_rate); tr.appendChild(tdHit);
     const tdLast = document.createElement('td'); tdLast.textContent = k.last_used || ''; tr.appendChild(tdLast);
