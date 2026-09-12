@@ -544,11 +544,40 @@ func (s *Server) stats() map[string]any {
 	var activeDonated int64
 	_ = s.pool.QueryRow(ctx, `SELECT count(*) FROM donated_tokens WHERE revoked=false`).Scan(&activeDonated)
 
+	// GitHub exposes separate quotas by resource. Core covers normal REST API
+	// traffic, so keep it separate from search and GraphQL's smaller pools.
+	// Once a recorded window has elapsed, estimate that token as refilled.
+	var coreRateLimit, coreRateRemaining, coreRateTracked int64
+	var coreRateReset, coreRateUpdatedAt *time.Time
+	_ = s.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(tr.rate_limit), 0)::bigint,
+		       COALESCE(SUM(CASE WHEN tr.reset <= now() THEN tr.rate_limit ELSE tr.remaining END), 0)::bigint,
+		       COUNT(*)::bigint,
+		       MIN(tr.reset) FILTER (WHERE tr.reset > now()),
+		       MIN(tr.updated_at)
+		FROM token_rate_limits tr
+		JOIN donated_tokens dt ON dt.id = tr.token_id
+		WHERE dt.revoked = false AND tr.category = 'core'
+	`).Scan(&coreRateLimit, &coreRateRemaining, &coreRateTracked, &coreRateReset, &coreRateUpdatedAt)
+
+	var coreRateResetUnix, coreRateUpdatedUnix int64
+	if coreRateReset != nil {
+		coreRateResetUnix = coreRateReset.Unix()
+	}
+	if coreRateUpdatedAt != nil {
+		coreRateUpdatedUnix = coreRateUpdatedAt.Unix()
+	}
+
 	return map[string]any{
-		"totalRequests": totalRequests,
-		"cacheHitRate":  fmt.Sprintf("%.1f%%", hitPct),
-		"today":         todayRequests,
-		"activeTokens":  activeDonated,
+		"totalRequests":       totalRequests,
+		"cacheHitRate":        fmt.Sprintf("%.1f%%", hitPct),
+		"today":               todayRequests,
+		"activeTokens":        activeDonated,
+		"coreRateLimit":       coreRateLimit,
+		"coreRateRemaining":   coreRateRemaining,
+		"coreRateTracked":     coreRateTracked,
+		"coreRateResetUnix":   coreRateResetUnix,
+		"coreRateUpdatedUnix": coreRateUpdatedUnix,
 	}
 }
 
