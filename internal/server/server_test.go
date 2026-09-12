@@ -21,6 +21,16 @@ func setupTestDB(t *testing.T) (*pgxpool.Pool, func()) {
 	return nil, func() {}
 }
 
+func TestHealthEndpoint(t *testing.T) {
+	s := &Server{}
+	recorder := httptest.NewRecorder()
+	s.routes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("GET /healthz returned %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+}
+
 func TestFormatNumber(t *testing.T) {
 	tests := map[int64]string{
 		0:        "0",
