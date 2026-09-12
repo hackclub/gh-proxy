@@ -21,6 +21,20 @@ func setupTestDB(t *testing.T) (*pgxpool.Pool, func()) {
 	return nil, func() {}
 }
 
+func TestFormatNumber(t *testing.T) {
+	tests := map[int64]string{
+		0:        "0",
+		999:      "999",
+		1000:     "1,000",
+		21558981: "21,558,981",
+	}
+	for input, want := range tests {
+		if got := formatNumber(input); got != want {
+			t.Errorf("formatNumber(%d) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestOpenAPIEndpoint(t *testing.T) {
 	// Check if OpenAPI spec file exists
 	specPath := "openapi.json"
