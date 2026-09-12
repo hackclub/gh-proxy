@@ -30,7 +30,7 @@ func main() {
 
 	baseURL := os.Args[1]
 	apiKey := os.Args[2]
-	
+
 	concurrentUsers := 50
 	durationSeconds := 30
 	if len(os.Args) > 3 {
@@ -47,7 +47,7 @@ func main() {
 	log.Printf("   Target: 500+ RPS")
 
 	result := runBenchmark(baseURL, apiKey, concurrentUsers, time.Duration(durationSeconds)*time.Second)
-	
+
 	fmt.Printf("\n")
 	fmt.Printf("📊 BENCHMARK RESULTS\n")
 	fmt.Printf("====================\n")
@@ -59,14 +59,14 @@ func main() {
 	fmt.Printf("Duration:           %v\n", result.TotalDuration.Truncate(time.Millisecond))
 	fmt.Printf("Avg Response Time:  %v\n", result.AvgResponseTime.Truncate(time.Millisecond))
 	fmt.Printf("Requests/Second:    %.1f RPS\n", result.RPS)
-	
+
 	fmt.Printf("\n")
 	if result.RPS >= 500 {
 		fmt.Printf("✅ SUCCESS: Achieved %.1f RPS (target: 500+ RPS)\n", result.RPS)
 	} else {
 		fmt.Printf("❌ FAILED: Only achieved %.1f RPS (target: 500+ RPS)\n", result.RPS)
 	}
-	
+
 	if result.SuccessRequests < result.TotalRequests/2 {
 		fmt.Printf("⚠️  High error rate: %.1f%% errors\n", float64(result.ErrorRequests)*100/float64(result.TotalRequests))
 	}
@@ -74,11 +74,11 @@ func main() {
 
 func runBenchmark(baseURL, apiKey string, concurrentUsers int, duration time.Duration) BenchmarkResult {
 	var (
-		totalRequests   int64
-		successRequests int64
-		errorRequests   int64
-		cacheHits       int64
-		cacheMisses     int64
+		totalRequests     int64
+		successRequests   int64
+		errorRequests     int64
+		cacheHits         int64
+		cacheMisses       int64
 		totalResponseTime int64
 	)
 
@@ -99,7 +99,7 @@ func runBenchmark(baseURL, apiKey string, concurrentUsers int, duration time.Dur
 	// Different endpoints to test various scenarios
 	endpoints := []string{
 		"/gh/user",
-		"/gh/repos/zachlatta/sshtron", 
+		"/gh/repos/zachlatta/sshtron",
 		"/gh/repos/zachlatta/sshtron/languages",
 		"/gh/repos/zachlatta/sshtron/contributors",
 		"/gh/users/zachlatta",
@@ -112,7 +112,7 @@ func runBenchmark(baseURL, apiKey string, concurrentUsers int, duration time.Dur
 		go func(workerID int) {
 			defer wg.Done()
 			endpointIdx := 0
-			
+
 			for {
 				select {
 				case <-ctx.Done():
@@ -121,28 +121,28 @@ func runBenchmark(baseURL, apiKey string, concurrentUsers int, duration time.Dur
 					// Cycle through endpoints
 					endpoint := endpoints[endpointIdx%len(endpoints)]
 					endpointIdx++
-					
+
 					reqStart := time.Now()
 					req, _ := http.NewRequestWithContext(ctx, "GET", baseURL+endpoint, nil)
 					req.Header.Set("X-API-Key", apiKey)
-					
+
 					resp, err := client.Do(req)
-					
+
 					// Add small delay to prevent overwhelming the server during testing
 					time.Sleep(10 * time.Millisecond)
 					responseTime := time.Since(reqStart)
-					
+
 					atomic.AddInt64(&totalRequests, 1)
 					atomic.AddInt64(&totalResponseTime, int64(responseTime))
-					
+
 					if err != nil {
 						atomic.AddInt64(&errorRequests, 1)
 						continue
 					}
-					
+
 					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 						atomic.AddInt64(&successRequests, 1)
-						
+
 						// Check cache status
 						cacheStatus := resp.Header.Get("X-Gh-Proxy-Cache")
 						if cacheStatus == "hit" {
@@ -153,7 +153,7 @@ func runBenchmark(baseURL, apiKey string, concurrentUsers int, duration time.Dur
 					} else {
 						atomic.AddInt64(&errorRequests, 1)
 					}
-					
+
 					// Read and discard response body
 					io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()

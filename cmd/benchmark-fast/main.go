@@ -18,7 +18,7 @@ func main() {
 	}
 
 	baseURL := os.Args[1]
-	apiKey := os.Args[2] 
+	apiKey := os.Args[2]
 	targetRPS := 200
 	duration := 60
 
@@ -35,7 +35,7 @@ func main() {
 	fmt.Printf("Strategy: Aggressive batching with minimal delays\n\n")
 
 	result := runAggressiveBenchmark(baseURL, apiKey, targetRPS, duration)
-	
+
 	fmt.Printf("📊 FINAL RESULTS:\n")
 	fmt.Printf("=================\n")
 	fmt.Printf("Duration: %ds\n", result.Duration)
@@ -111,40 +111,40 @@ func runAggressiveBenchmark(baseURL, apiKey string, targetRPS, duration int) Ben
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			
+
 			// Calculate delay for this worker to hit target RPS
 			workerRPS := targetRPS / workers
 			delay := time.Duration(1000/workerRPS) * time.Millisecond
-			
+
 			for {
 				select {
 				case <-ctx.Done():
 					return
 				default:
 					reqStart := time.Now()
-					
+
 					req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 					if err != nil {
 						atomic.AddInt64(&errorRequests, 1)
 						atomic.AddInt64(&totalRequests, 1)
 						continue
 					}
-					
+
 					req.Header.Set("X-API-Key", apiKey)
 					resp, err := client.Do(req)
-					
+
 					latency := time.Since(reqStart)
 					atomic.AddInt64(&totalLatency, int64(latency))
 					atomic.AddInt64(&totalRequests, 1)
-					
+
 					if err != nil {
 						atomic.AddInt64(&errorRequests, 1)
 						continue
 					}
-					
+
 					if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 						atomic.AddInt64(&successRequests, 1)
-						
+
 						// Check cache status
 						if resp.Header.Get("X-Gh-Proxy-Cache") == "hit" {
 							atomic.AddInt64(&cacheHits, 1)
@@ -154,11 +154,11 @@ func runAggressiveBenchmark(baseURL, apiKey string, targetRPS, duration int) Ben
 					} else {
 						atomic.AddInt64(&errorRequests, 1)
 					}
-					
+
 					// Consume response
 					io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()
-					
+
 					// Rate limiting delay
 					time.Sleep(delay)
 				}
@@ -170,7 +170,7 @@ func runAggressiveBenchmark(baseURL, apiKey string, targetRPS, duration int) Ben
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
-		
+
 		for {
 			select {
 			case <-ctx.Done():

@@ -7,10 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
-	"log"
 	"time"
 )
 
@@ -45,7 +45,9 @@ type ghTokenResp struct {
 	TokenType   string `json:"token_type"`
 }
 
-type ghUser struct{ Login string `json:"login"` }
+type ghUser struct {
+	Login string `json:"login"`
+}
 
 func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	if e := r.URL.Query().Get("error"); e != "" {
