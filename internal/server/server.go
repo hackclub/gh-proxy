@@ -147,17 +147,23 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	var totalRequests, requests7Days, requests24Hours int64
 	var lastUser, lastURL, lastAgo string
 	var lastAt *time.Time
+	statsTrackingStartedAt := time.Now()
 	_ = s.pool.QueryRow(r.Context(), `SELECT COUNT(*) FROM donated_tokens WHERE revoked=false`).Scan(&donors)
 	_ = s.pool.QueryRow(r.Context(), `SELECT github_user, created_at FROM donated_tokens WHERE revoked=false ORDER BY created_at DESC LIMIT 1`).Scan(&lastUser, &lastAt)
 	_ = s.pool.QueryRow(r.Context(), `
 		SELECT
 			COALESCE((SELECT total_requests FROM system_stats WHERE id = 1), 0),
 			COALESCE(SUM(requests) FILTER (WHERE hour >= date_trunc('hour', now()) - interval '167 hours'), 0),
-			COALESCE(SUM(requests) FILTER (WHERE hour >= date_trunc('hour', now()) - interval '23 hours'), 0)
+			COALESCE(SUM(requests) FILTER (WHERE hour >= date_trunc('hour', now()) - interval '23 hours'), 0),
+			COALESCE((SELECT stats_tracking_started_at FROM system_stats WHERE id = 1), now())
 		FROM request_stats_hourly
-	`).Scan(&totalRequests, &requests7Days, &requests24Hours)
+	`).Scan(&totalRequests, &requests7Days, &requests24Hours, &statsTrackingStartedAt)
 	if lastUser != "" { lastURL = "https://github.com/" + lastUser }
 	if lastAt != nil { lastAgo = humanizeDuration(time.Since(*lastAt)) }
+	requests7DaysLabel := "since tracking began"
+	if time.Since(statsTrackingStartedAt) >= 7*24*time.Hour { requests7DaysLabel = "in the past 7 days" }
+	requests24HoursLabel := "since tracking began"
+	if time.Since(statsTrackingStartedAt) >= 24*time.Hour { requests24HoursLabel = "in the past 24 hours" }
 	data := map[string]any{
 		"Donors": donors,
 		"LastUser": lastUser,
@@ -165,7 +171,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"LastAgo": lastAgo,
 		"TotalRequests": formatNumber(totalRequests),
 		"Requests7Days": formatNumber(requests7Days),
+		"Requests7DaysLabel": requests7DaysLabel,
 		"Requests24Hours": formatNumber(requests24Hours),
+		"Requests24HoursLabel": requests24HoursLabel,
 	}
 	s.render(w, "index.html", data)
 }
@@ -414,8 +422,9 @@ func (s *Server) LogsJanitor() {
 	defer t.Stop()
 	for range t.C {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		// delete rows with id <= (max(id) - 1000)
+		// Detailed logs are bounded by row count; hourly graph data is bounded by age.
 		_, _ = s.pool.Exec(ctx, `DELETE FROM request_logs WHERE id <= GREATEST((SELECT COALESCE(MAX(id),0) FROM request_logs) - 1000, 0)`)
+		_, _ = s.pool.Exec(ctx, `DELETE FROM request_stats_hourly WHERE hour < date_trunc('hour', now()) - interval '8 days'`)
 		cancel()
 	}
 }
