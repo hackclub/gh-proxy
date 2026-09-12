@@ -163,9 +163,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"LastUser": lastUser,
 		"LastURL": lastURL,
 		"LastAgo": lastAgo,
-		"TotalRequests": totalRequests,
-		"Requests7Days": requests7Days,
-		"Requests24Hours": requests24Hours,
+		"TotalRequests": formatNumber(totalRequests),
+		"Requests7Days": formatNumber(requests7Days),
+		"Requests24Hours": formatNumber(requests24Hours),
 	}
 	s.render(w, "index.html", data)
 }
@@ -186,6 +186,14 @@ func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+func formatNumber(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }
 
 func humanizeDuration(d time.Duration) string {
