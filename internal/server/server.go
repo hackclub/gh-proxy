@@ -76,6 +76,9 @@ func (s *Server) routes() *mux.Router {
 	r := mux.NewRouter()
 	r.Use(s.requestLogger)
 	r.Use(s.rateLimitPolicyHeader)
+	r.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}).Methods("GET")
 	r.HandleFunc("/", s.handleIndex).Methods("GET", "HEAD")
 	r.HandleFunc("/docs", s.handleDocs).Methods("GET", "HEAD")
 	r.HandleFunc("/openapi.json", s.handleOpenAPI).Methods("GET", "HEAD")
