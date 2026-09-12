@@ -87,35 +87,35 @@ func TestOpenAPIEndpoint(t *testing.T) {
 
 func TestJSONErrorHelper(t *testing.T) {
 	tests := []struct {
-		name         string
-		code         string
-		message      string
-		hint         string
-		status       int
-		wantFields   []string
+		name       string
+		code       string
+		message    string
+		hint       string
+		status     int
+		wantFields []string
 	}{
 		{
-			name:   "missing_api_key",
-			code:   "MISSING_API_KEY",
-			message: "Missing X-API-Key header",
-			hint:   "Include your API key in the X-API-Key header",
-			status: 401,
+			name:       "missing_api_key",
+			code:       "MISSING_API_KEY",
+			message:    "Missing X-API-Key header",
+			hint:       "Include your API key in the X-API-Key header",
+			status:     401,
 			wantFields: []string{"error", "code", "message", "hint"},
 		},
 		{
-			name:   "rate_limit",
-			code:   "RATE_LIMIT_EXCEEDED",
-			message: "Rate limit exceeded",
-			hint:   "Implement exponential backoff",
-			status: 429,
+			name:       "rate_limit",
+			code:       "RATE_LIMIT_EXCEEDED",
+			message:    "Rate limit exceeded",
+			hint:       "Implement exponential backoff",
+			status:     429,
 			wantFields: []string{"error", "code", "message", "hint"},
 		},
 		{
-			name:   "api_key_disabled",
-			code:   "API_KEY_DISABLED",
-			message: "API key disabled",
-			hint:   "Contact administrator to re-enable",
-			status: 403,
+			name:       "api_key_disabled",
+			code:       "API_KEY_DISABLED",
+			message:    "API key disabled",
+			hint:       "Contact administrator to re-enable",
+			status:     403,
 			wantFields: []string{"error", "code", "message", "hint"},
 		},
 	}

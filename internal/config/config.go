@@ -9,18 +9,18 @@ import (
 )
 
 type Config struct {
-	DatabaseURL       string
-	BaseURL           string
-	AdminUser         string
-	AdminPass         string
-	GithubClientID    string
+	DatabaseURL        string
+	BaseURL            string
+	AdminUser          string
+	AdminPass          string
+	GithubClientID     string
 	GithubClientSecret string
-	MaxCacheTime      timeDuration
-	MaxCacheSizeMB    int64
-	DBMaxConns        int32
-	DBMaxIdleConns    int32
-	DBConnMaxLifetime int32
-	MaxProxyBodyBytes int64
+	MaxCacheTime       timeDuration
+	MaxCacheSizeMB     int64
+	DBMaxConns         int32
+	DBMaxIdleConns     int32
+	DBConnMaxLifetime  int32
+	MaxProxyBodyBytes  int64
 }
 
 type timeDuration struct{ Seconds int64 }
@@ -29,7 +29,9 @@ func (d timeDuration) Duration() int64 { return d.Seconds }
 
 func getenv(key, def string) string {
 	v := os.Getenv(key)
-	if v == "" { return def }
+	if v == "" {
+		return def
+	}
 	return v
 }
 
@@ -48,7 +50,7 @@ func Load() Config {
 		MaxCacheSizeMB:     maxCacheSize,
 		DBMaxConns:         parseInt32(getenv("DB_MAX_CONNS", "150")),
 		DBMaxIdleConns:     parseInt32(getenv("DB_MAX_IDLE_CONNS", "50")),
-		DBConnMaxLifetime:  parseInt32(getenv("DB_CONN_MAX_LIFETIME", "1800")), // 30 minutes
+		DBConnMaxLifetime:  parseInt32(getenv("DB_CONN_MAX_LIFETIME", "1800")),  // 30 minutes
 		MaxProxyBodyBytes:  parseInt(getenv("MAX_PROXY_BODY_BYTES", "1048576")), // 1MB
 	}
 	if cfg.GithubClientID == "" || cfg.GithubClientSecret == "" {
@@ -59,13 +61,17 @@ func Load() Config {
 
 func parseInt(s string) int64 {
 	v, err := strconv.ParseInt(s, 10, 64)
-	if err != nil { return 0 }
+	if err != nil {
+		return 0
+	}
 	return v
 }
 
 func parseInt32(s string) int32 {
 	v, err := strconv.ParseInt(s, 10, 32)
-	if err != nil { return 0 }
+	if err != nil {
+		return 0
+	}
 	return int32(v)
 }
 

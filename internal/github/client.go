@@ -24,17 +24,17 @@ type Client struct {
 func New(pool *pgxpool.Pool) *Client {
 	// Optimized HTTP client for high throughput
 	transport := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 5 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
 		ResponseHeaderTimeout: 10 * time.Second,
 	}
-	
+
 	return &Client{
-		pool: pool, 
+		pool: pool,
 		http: &http.Client{
-			Timeout: 15 * time.Second, // Faster timeout for high throughput
+			Timeout:   15 * time.Second, // Faster timeout for high throughput
 			Transport: transport,
 		},
 	}
@@ -44,23 +44,30 @@ type rateLimits struct {
 	Core, Search, CodeSearch, GraphQL limitCat
 }
 
-type limitCat struct { Limit, Remaining int; Reset time.Time }
+type limitCat struct {
+	Limit, Remaining int
+	Reset            time.Time
+}
 
 type rateAPIResp struct {
-	Resources map[string]struct{
-		Limit int `json:"limit"`
-		Used int `json:"used"`
-		Remaining int `json:"remaining"`
-		Reset int64 `json:"reset"`
+	Resources map[string]struct {
+		Limit     int   `json:"limit"`
+		Used      int   `json:"used"`
+		Remaining int   `json:"remaining"`
+		Reset     int64 `json:"reset"`
 	} `json:"resources"`
 }
 
 func (c *Client) refreshRate(ctx context.Context, tokenID string, token string) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/rate_limit", nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
-	if token != "" { req.Header.Set("Authorization", "Bearer "+token) }
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := c.http.Do(req)
-	if err != nil { return }
+	if err != nil {
+		return
+	}
 	defer resp.Body.Close()
 	var rr rateAPIResp
 	_ = json.NewDecoder(resp.Body).Decode(&rr)
@@ -73,48 +80,78 @@ func (c *Client) refreshRate(ctx context.Context, tokenID string, token string) 
 
 func (c *Client) chooseToken(ctx context.Context, category string) (id string, token string, err error) {
 	rows, err := c.pool.Query(ctx, `SELECT id::text, token FROM donated_tokens WHERE revoked=false ORDER BY COALESCE(last_ok_at, 'epoch') ASC`)
-	if err != nil { return "", "", err }
+	if err != nil {
+		return "", "", err
+	}
 	defer rows.Close()
-	type tk struct{ id, token string; remaining int; reset time.Time }
+	type tk struct {
+		id, token string
+		remaining int
+		reset     time.Time
+	}
 	var toks []tk
 	for rows.Next() {
 		var id, tkstr string
-		if err := rows.Scan(&id, &tkstr); err != nil { return "", "", err }
-		var rem int; var reset time.Time
+		if err := rows.Scan(&id, &tkstr); err != nil {
+			return "", "", err
+		}
+		var rem int
+		var reset time.Time
 		_ = c.pool.QueryRow(ctx, `SELECT remaining, reset FROM token_rate_limits WHERE token_id=$1 AND category=$2`, id, category).Scan(&rem, &reset)
 		toks = append(toks, tk{id: id, token: tkstr, remaining: rem, reset: reset})
 	}
-	if len(toks) == 0 { return "", "", errors.New("no donated tokens") }
-	sort.Slice(toks, func(i,j int) bool { if toks[i].remaining==toks[j].remaining { return toks[i].reset.Before(toks[j].reset) }; return toks[i].remaining>toks[j].remaining })
+	if len(toks) == 0 {
+		return "", "", errors.New("no donated tokens")
+	}
+	sort.Slice(toks, func(i, j int) bool {
+		if toks[i].remaining == toks[j].remaining {
+			return toks[i].reset.Before(toks[j].reset)
+		}
+		return toks[i].remaining > toks[j].remaining
+	})
 	ch := toks[0]
 	return ch.id, ch.token, nil
 }
 
 func categoryFor(url string) string {
-	if strings.Contains(url, "/graphql") { return "graphql" }
-	if strings.Contains(url, "/search/code") { return "code_search" }
-	if strings.Contains(url, "/search/") { return "search" }
+	if strings.Contains(url, "/graphql") {
+		return "graphql"
+	}
+	if strings.Contains(url, "/search/code") {
+		return "code_search"
+	}
+	if strings.Contains(url, "/search/") {
+		return "search"
+	}
 	return "core"
 }
 
 func (c *Client) Do(ctx context.Context, method, rawURL string, body []byte) (status int, headers http.Header, respBody []byte, usedToken string, err error) {
 	parsed, perr := url.Parse(rawURL)
-	if perr != nil { return 0, nil, nil, "", fmt.Errorf("invalid url: %w", perr) }
+	if perr != nil {
+		return 0, nil, nil, "", fmt.Errorf("invalid url: %w", perr)
+	}
 	if parsed.Scheme != "https" || parsed.Host != "api.github.com" {
 		return 0, nil, nil, "", fmt.Errorf("disallowed request target")
 	}
 	safeURL := parsed.String()
 	cat := categoryFor(safeURL)
 	id, token, err := c.chooseToken(ctx, cat)
-	if err != nil { return 0, nil, nil, "", err }
+	if err != nil {
+		return 0, nil, nil, "", err
+	}
 	req, err := http.NewRequestWithContext(ctx, method, safeURL, bytes.NewReader(body))
-	if err != nil { return 0, nil, nil, "", err }
+	if err != nil {
+		return 0, nil, nil, "", err
+	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("User-Agent", "gh-proxy/1.0")
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := c.http.Do(req)
-	if err != nil { return 0, nil, nil, "", err }
+	if err != nil {
+		return 0, nil, nil, "", err
+	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
@@ -123,7 +160,9 @@ func (c *Client) Do(ctx context.Context, method, rawURL string, body []byte) (st
 		// Only revoke on 401 or explicit bad credentials
 		shouldRevoke := resp.StatusCode == 401
 		if resp.StatusCode == 403 {
-			var em struct{ Message string `json:"message"` }
+			var em struct {
+				Message string `json:"message"`
+			}
 			_ = json.Unmarshal(b, &em)
 			if strings.Contains(strings.ToLower(em.Message), "bad credentials") {
 				shouldRevoke = true
@@ -132,8 +171,10 @@ func (c *Client) Do(ctx context.Context, method, rawURL string, body []byte) (st
 		if shouldRevoke {
 			_, _ = c.pool.Exec(ctx, `UPDATE donated_tokens SET revoked=true WHERE id=$1`, id)
 			logMsg := "token unauthorized; marked revoked"
-			if user != "" { logMsg += " (@" + user + ")" }
-			return resp.StatusCode, resp.Header, b, id, fmt.Errorf(logMsg)
+			if user != "" {
+				logMsg += " (@" + user + ")"
+			}
+			return resp.StatusCode, resp.Header, b, id, errors.New(logMsg)
 		}
 	}
 	// update rate limits from headers if present
