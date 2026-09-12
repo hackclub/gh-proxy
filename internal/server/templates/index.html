@@ -16,6 +16,11 @@
       .donate-container { max-width: 720px; width: 100%; }
       h1 { font-size: 2rem; margin-bottom: 1rem; }
       .stats-box { background: #f7f7f8; border: 1px solid #eee; border-radius: 12px; padding: 1rem; margin: 1rem 0; }
+      .request-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; margin-top: 1rem; }
+      .request-stat { background: #fff; border: 1px solid #e5e5e5; border-radius: 8px; padding: 0.75rem; }
+      .request-stat strong { display: block; font-size: 1.4rem; }
+      .request-stat span { color: #666; font-size: 0.85rem; }
+      @media (max-width: 520px) { .request-stats { grid-template-columns: 1fr; } }
       .donate-button { background: #111; color: #fff; border: none; padding: 0.8rem 1.2rem; border-radius: 8px; font-weight: 600; cursor: pointer; }
       .donate-button:hover { opacity: 0.95; }
       .docs-link { display: inline-block; margin-top: 1rem; padding: 0.6rem 1rem; background: #f0f0f0; color: #333; text-decoration: none; border-radius: 6px; font-weight: 500; }
@@ -32,6 +37,11 @@
       {{if .LastUser}}
       <p>The most recent person to donate was <a href="{{.LastURL}}"><strong>@{{.LastUser}}</strong></a>{{if .LastAgo}} ({{.LastAgo}}).{{end}}</p>
       {{end}}
+      <div class="request-stats">
+        <div class="request-stat"><strong>{{.TotalRequests}}</strong><span>requests processed in total</span></div>
+        <div class="request-stat"><strong>{{.Requests7Days}}</strong><span>in the past 7 days</span></div>
+        <div class="request-stat"><strong>{{.Requests24Hours}}</strong><span>in the past 24 hours</span></div>
+      </div>
   </div>
 
   <p>I'm working on various projects that use the GitHub public API to answer questions like:</p>

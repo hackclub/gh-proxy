@@ -144,10 +144,18 @@ func (s *Server) basicAuth(next http.Handler) http.Handler {
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	var donors int
+	var totalRequests, requests7Days, requests24Hours int64
 	var lastUser, lastURL, lastAgo string
 	var lastAt *time.Time
 	_ = s.pool.QueryRow(r.Context(), `SELECT COUNT(*) FROM donated_tokens WHERE revoked=false`).Scan(&donors)
 	_ = s.pool.QueryRow(r.Context(), `SELECT github_user, created_at FROM donated_tokens WHERE revoked=false ORDER BY created_at DESC LIMIT 1`).Scan(&lastUser, &lastAt)
+	_ = s.pool.QueryRow(r.Context(), `
+		SELECT
+			COALESCE((SELECT total_requests FROM system_stats WHERE id = 1), 0),
+			COALESCE(SUM(requests) FILTER (WHERE hour >= date_trunc('hour', now()) - interval '167 hours'), 0),
+			COALESCE(SUM(requests) FILTER (WHERE hour >= date_trunc('hour', now()) - interval '23 hours'), 0)
+		FROM request_stats_hourly
+	`).Scan(&totalRequests, &requests7Days, &requests24Hours)
 	if lastUser != "" { lastURL = "https://github.com/" + lastUser }
 	if lastAt != nil { lastAgo = humanizeDuration(time.Since(*lastAt)) }
 	data := map[string]any{
@@ -155,6 +163,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"LastUser": lastUser,
 		"LastURL": lastURL,
 		"LastAgo": lastAgo,
+		"TotalRequests": totalRequests,
+		"Requests7Days": requests7Days,
+		"Requests24Hours": requests24Hours,
 	}
 	s.render(w, "index.html", data)
 }
@@ -375,6 +386,11 @@ func (s *Server) logRequest(ctx context.Context, apiKeyHash, method, path string
 	
 	// Update cumulative stats - system level
 	s.updateSystemStats(ctx, hit)
+	_, _ = s.pool.Exec(ctx, `
+		INSERT INTO request_stats_hourly (hour, requests)
+		VALUES (date_trunc('hour', now()), 1)
+		ON CONFLICT (hour) DO UPDATE SET requests = request_stats_hourly.requests + 1
+	`)
 	
 	// Update cumulative stats - per API key level
 	if hit {
