@@ -1,4 +1,11 @@
 version: 2
+registries:
+  dhi:
+    type: docker-registry
+    url: dhi.io
+    username: ${{secrets.DHI_USERNAME}}
+    password: ${{secrets.DHI_TOKEN}}
+
 updates:
   - package-ecosystem: gomod
     directory: /
@@ -13,6 +20,8 @@ updates:
 
   - package-ecosystem: docker
     directory: /
+    registries:
+      - dhi
     schedule:
       interval: weekly
       day: monday

@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	_ "time/tzdata" // embed the IANA database so LoadLocation works on any base image
 
 	"gh-proxy/internal/config"
 	"gh-proxy/internal/db"
