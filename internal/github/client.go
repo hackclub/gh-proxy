@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,10 +20,15 @@ import (
 )
 
 type Client struct {
-	pool *pgxpool.Pool
-	http *http.Client
+	pool       *pgxpool.Pool
+	http       *http.Client
 	refreshing sync.Map
+
+	ratesMu sync.Mutex
+	rates   map[rateKey]limitCat
 }
+
+type rateKey struct{ tokenID, category string }
 
 func New(pool *pgxpool.Pool) *Client {
 	// Optimized HTTP client for high throughput
@@ -34,7 +41,8 @@ func New(pool *pgxpool.Pool) *Client {
 	}
 
 	return &Client{
-		pool: pool,
+		pool:  pool,
+		rates: make(map[rateKey]limitCat),
 		http: &http.Client{
 			Timeout:   15 * time.Second, // Faster timeout for high throughput
 			Transport: transport,
@@ -166,8 +174,109 @@ func (c *Client) Do(ctx context.Context, method, rawURL string, body []byte) (st
 			return resp.StatusCode, resp.Header, b, user, errors.New(logMsg)
 		}
 	}
-	// update rate limits from headers if present
-	// Alternatively call /rate_limit periodically
-	go c.refreshRate(id, token)
+	// GitHub reports the token's remaining quota on every response; only ask
+	// /rate_limit when the headers are missing.
+	if !c.recordRateHeaders(id, cat, resp.Header) {
+		go c.refreshRate(id, token)
+	}
 	return resp.StatusCode, resp.Header, b, user, nil
+}
+
+func (c *Client) recordRateHeaders(tokenID, category string, h http.Header) bool {
+	limit, err1 := strconv.Atoi(h.Get("X-RateLimit-Limit"))
+	remaining, err2 := strconv.Atoi(h.Get("X-RateLimit-Remaining"))
+	reset, err3 := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64)
+	if err1 != nil || err2 != nil || err3 != nil {
+		return false
+	}
+	if r := h.Get("X-RateLimit-Resource"); r != "" {
+		category = r
+	}
+	sample := limitCat{Limit: limit, Remaining: remaining, Reset: time.Unix(reset, 0)}
+	k := rateKey{tokenID, category}
+	c.ratesMu.Lock()
+	if cur, ok := c.rates[k]; !ok || newerRate(sample, cur) {
+		c.rates[k] = sample
+	}
+	c.ratesMu.Unlock()
+	return true
+}
+
+// newerRate reports whether a supersedes b. Responses can finish out of
+// order, but within one window remaining only goes down.
+func newerRate(a, b limitCat) bool {
+	if !a.Reset.Equal(b.Reset) {
+		return a.Reset.After(b.Reset)
+	}
+	return a.Remaining < b.Remaining
+}
+
+// RunRateWriter flushes recorded rate limits every interval until ctx is canceled.
+func (c *Client) RunRateWriter(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			fctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			if err := c.FlushRates(fctx); err != nil {
+				log.Printf("rate limit flush failed, will retry: %v", err)
+			}
+			cancel()
+		}
+	}
+}
+
+// FlushRates writes the recorded rate limits in one batch. On failure they
+// are kept, unless a newer sample arrived meanwhile, for the next flush.
+func (c *Client) FlushRates(ctx context.Context) error {
+	c.ratesMu.Lock()
+	rates := c.rates
+	c.rates = make(map[rateKey]limitCat)
+	c.ratesMu.Unlock()
+	if len(rates) == 0 {
+		return nil
+	}
+	var ids, cats, tokens []string
+	var limits, remaining []int32
+	var resets []time.Time
+	seen := map[string]bool{}
+	for k, v := range rates {
+		ids = append(ids, k.tokenID)
+		cats = append(cats, k.category)
+		limits = append(limits, int32(v.Limit))
+		remaining = append(remaining, int32(v.Remaining))
+		resets = append(resets, v.Reset)
+		if !seen[k.tokenID] {
+			seen[k.tokenID] = true
+			tokens = append(tokens, k.tokenID)
+		}
+	}
+	batch := &pgx.Batch{}
+	// The join skips tokens deleted since the request. The WHERE keeps another
+	// instance's older sample from overwriting a newer one.
+	batch.Queue(`
+		INSERT INTO token_rate_limits (token_id, category, rate_limit, remaining, reset, updated_at)
+		SELECT dt.id, v.category, v.rate_limit, v.remaining, v.reset, now()
+		FROM unnest($1::text[], $2::text[], $3::int[], $4::int[], $5::timestamptz[]) AS v(token_id, category, rate_limit, remaining, reset)
+		JOIN donated_tokens dt ON dt.id = v.token_id::uuid
+		ON CONFLICT (token_id, category) DO UPDATE SET
+			rate_limit = EXCLUDED.rate_limit, remaining = EXCLUDED.remaining, reset = EXCLUDED.reset, updated_at = now()
+		WHERE EXCLUDED.reset > token_rate_limits.reset
+		   OR (EXCLUDED.reset = token_rate_limits.reset AND EXCLUDED.remaining <= token_rate_limits.remaining)
+	`, ids, cats, limits, remaining, resets)
+	batch.Queue(`UPDATE donated_tokens SET last_ok_at = now() WHERE id = ANY($1::text[]::uuid[])`, tokens)
+	if err := c.pool.SendBatch(ctx, batch).Close(); err != nil {
+		c.ratesMu.Lock()
+		for k, v := range rates {
+			if cur, ok := c.rates[k]; !ok || newerRate(v, cur) {
+				c.rates[k] = v
+			}
+		}
+		c.ratesMu.Unlock()
+		return err
+	}
+	return nil
 }

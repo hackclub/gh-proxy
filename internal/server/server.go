@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -48,10 +49,12 @@ type Server struct {
 	cacheHits atomic.Int64
 	hub       *wsHub
 	tmpl      *template.Template
-	// unix nanos of the last websocket stats push
-	lastStatsAt atomic.Int64
 	// rate limiting
 	ratelimit *rateLimiter
+	apiKeys   *apiKeyCache
+	// buffered request logs and usage counters
+	usage     *statsWriter
+	stopUsage context.CancelFunc
 }
 
 func New(pool *pgxpool.Pool, cfg config.Config) *Server {
@@ -62,7 +65,14 @@ func New(pool *pgxpool.Pool, cfg config.Config) *Server {
 		gh:        gh.New(pool),
 		hub:       newWSHub(),
 		ratelimit: newRateLimiter(),
+		apiKeys:   newAPIKeyCache(apiKeyCacheTTL),
+		usage:     newStatsWriter(pool),
 	}
+	var usageCtx context.Context
+	usageCtx, s.stopUsage = context.WithCancel(context.Background())
+	go s.usage.run(usageCtx, time.Second)
+	go s.gh.RunRateWriter(usageCtx, time.Second)
+	go s.broadcastStatsLoop(usageCtx, time.Second)
 	s.u = upgrader{Upgrader: websocket.Upgrader{CheckOrigin: s.checkWebsocketOrigin}}
 	s.tmpl = template.Must(template.ParseFS(templatesFS, "templates/*.html"))
 	go s.hub.run()
@@ -70,6 +80,13 @@ func New(pool *pgxpool.Pool, cfg config.Config) *Server {
 
 	s.Router = s.routes()
 	return s
+}
+
+// Close stops background writers and flushes buffered request stats and rate
+// limits. Call it after the HTTP server has stopped accepting requests.
+func (s *Server) Close(ctx context.Context) error {
+	s.stopUsage()
+	return errors.Join(s.usage.flush(ctx), s.gh.FlushRates(ctx))
 }
 
 // routes builds the HTTP router. Kept separate from New so it can be
@@ -314,11 +331,14 @@ func (s *Server) handleDisableAPIKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	id := mux.Vars(r)["id"]
-	_, err := s.pool.Exec(r.Context(), `UPDATE api_keys SET disabled=true WHERE id::text=$1`, id)
-	if err != nil {
+	var keyHash string
+	err := s.pool.QueryRow(r.Context(), `UPDATE api_keys SET disabled=true WHERE id::text=$1 RETURNING key_hash`, id).Scan(&keyHash)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		s.jsonError(w, "DB_ERROR", "Failed to disable API key", err.Error(), 500)
 		return
 	}
+	// Other instances pick this up when their cached copy expires.
+	s.apiKeys.forget(keyHash)
 	log.Printf("disabled api key id=%s", id)
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
@@ -339,11 +359,8 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 		return
 	}
 	// rate limit and disabled check
-	var disabled bool
-	var perSec int
-	var hc, app, machine, hint string
 	apiKeyHash := sha256Hex(apiKey)
-	err := s.pool.QueryRow(r.Context(), `SELECT disabled, rate_limit_per_sec, hc_username, app_name, machine, COALESCE(key_hint,'') FROM api_keys WHERE key_hash=$1`, apiKeyHash).Scan(&disabled, &perSec, &hc, &app, &machine, &hint)
+	key, err := s.lookupAPIKey(r.Context(), apiKeyHash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		log.Printf("deny unknown key: %s", maskKey(apiKey))
 		setRateLimitHeaders(w.Header(), defaultRateLimitState())
@@ -355,14 +372,14 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 		s.jsonError(w, "DB_ERROR", "Could not verify the API key", "Transient server error; retry with backoff", http.StatusServiceUnavailable)
 		return
 	}
-	if disabled {
+	if key.disabled {
 		log.Printf("deny disabled key: %s", maskKey(apiKey))
-		setRateLimitHeaders(w.Header(), rateLimitState{Limit: perSec, Remaining: 0, Reset: 0})
+		setRateLimitHeaders(w.Header(), rateLimitState{Limit: key.perSec, Remaining: 0, Reset: 0})
 		s.jsonError(w, "API_KEY_DISABLED", "API key disabled", "Contact an administrator to re-enable your key", 403)
 		return
 	}
-	display := formatKeyDisplay(hc, app, machine, hint)
-	allowed, rlState := s.ratelimit.Allow(apiKeyHash, perSec)
+	display := key.display
+	allowed, rlState := s.ratelimit.Allow(apiKeyHash, key.perSec)
 	if !allowed {
 		log.Printf("429 rate limit for key %s", maskKey(apiKey))
 		setRateLimitHeaders(w.Header(), rlState)
@@ -445,48 +462,36 @@ func (s *Server) afterRequest(ctx context.Context, apiKeyHash, display, method, 
 		s.cacheHits.Add(1)
 	}
 	s.totalReq.Add(1)
-	s.logRequest(ctx, apiKeyHash, method, path, status, hit)
+	s.usage.record(apiKeyHash, method, path, status, hit)
 	log.Printf("%s %s -> %d (%s)", method, path, status, map[bool]string{true: "cache", false: "origin"}[hit])
 	s.hub.broadcastRecent(map[string]any{"method": method, "path": path, "created_at": time.Now(), "display": display})
-	s.maybeBroadcastStats()
 }
 
-// maybeBroadcastStats pushes dashboard stats to websocket viewers at most once
-// per second, and not at all when nobody is watching; stats() runs several
-// aggregate queries, so doing it per request multiplies DB load.
-func (s *Server) maybeBroadcastStats() {
-	if s.hub.clientCount.Load() == 0 {
-		return
+// broadcastStatsLoop pushes dashboard stats to websocket viewers on a timer
+// rather than per request, so the numbers keep up with flushed counters and
+// rate limits, including writes from other instances. It queries only while
+// someone is watching and sends only when something changed.
+func (s *Server) broadcastStatsLoop(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	var last []byte
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if s.hub.clientCount.Load() == 0 {
+			last = nil
+			continue
+		}
+		b, err := json.Marshal(map[string]any{"type": "stats", "data": s.stats()})
+		if err != nil || bytes.Equal(b, last) {
+			continue
+		}
+		last = b
+		s.hub.broadcast <- b
 	}
-	now := time.Now().UnixNano()
-	last := s.lastStatsAt.Load()
-	if now-last < int64(time.Second) || !s.lastStatsAt.CompareAndSwap(last, now) {
-		return
-	}
-	s.hub.broadcastStat(s.stats())
-}
-
-// logRequest records the request and bumps every counter in one batch: a
-// single pool acquire and round trip instead of one per statement.
-func (s *Server) logRequest(ctx context.Context, apiKeyHash, method, path string, status int, hit bool) {
-	batch := &pgx.Batch{}
-	batch.Queue(`INSERT INTO request_logs(api_key,method,path,status,cache_hit) VALUES($1,$2,$3,$4,$5)`, apiKeyHash, method, path, status, hit)
-
-	// Update cumulative stats - system level
-	queueSystemStats(batch, hit)
-	batch.Queue(`
-		INSERT INTO request_stats_hourly (hour, requests)
-		VALUES (date_trunc('hour', now()), 1)
-		ON CONFLICT (hour) DO UPDATE SET requests = request_stats_hourly.requests + 1
-	`)
-
-	// Update cumulative stats - per API key level
-	if hit {
-		batch.Queue(`UPDATE api_keys SET last_used_at=now(), total_requests=total_requests+1, total_cached_requests=total_cached_requests+1 WHERE key_hash=$1`, apiKeyHash)
-	} else {
-		batch.Queue(`UPDATE api_keys SET last_used_at=now(), total_requests=total_requests+1 WHERE key_hash=$1`, apiKeyHash)
-	}
-	_ = s.pool.SendBatch(ctx, batch).Close()
 }
 
 // prune request_logs to keep only latest N rows periodically (avoid doing it on hot path)
@@ -502,79 +507,57 @@ func (s *Server) LogsJanitor() {
 	}
 }
 
-// queueSystemStats increments system-wide cumulative counters and handles daily reset
-func queueSystemStats(batch *pgx.Batch, hit bool) {
-	// Use NYC Eastern Time for daily reset as requested
-	loc, _ := time.LoadLocation("America/New_York")
-	currentDate := time.Now().In(loc).Format("2006-01-02")
-
-	if hit {
-		// Increment both total requests and cached requests
-		batch.Queue(`
-			INSERT INTO system_stats (id, total_requests, total_cached_requests, today_requests, today_date) 
-			VALUES (1, 1, 1, 1, $1::date)
-			ON CONFLICT (id) DO UPDATE SET
-				total_requests = system_stats.total_requests + 1,
-				total_cached_requests = system_stats.total_cached_requests + 1,
-				today_requests = CASE 
-					WHEN system_stats.today_date = $1::date THEN system_stats.today_requests + 1
-					ELSE 1
-				END,
-				today_date = $1::date,
-				updated_at = now()
-		`, currentDate)
-	} else {
-		// Increment only total requests
-		batch.Queue(`
-			INSERT INTO system_stats (id, total_requests, total_cached_requests, today_requests, today_date) 
-			VALUES (1, 1, 0, 1, $1::date)
-			ON CONFLICT (id) DO UPDATE SET
-				total_requests = system_stats.total_requests + 1,
-				today_requests = CASE 
-					WHEN system_stats.today_date = $1::date THEN system_stats.today_requests + 1
-					ELSE 1
-				END,
-				today_date = $1::date,
-				updated_at = now()
-		`, currentDate)
+// lookupAPIKey returns the key's settings from memory when fresh, otherwise
+// from api_keys. It returns pgx.ErrNoRows for unknown keys.
+func (s *Server) lookupAPIKey(ctx context.Context, hash string) (apiKeyInfo, error) {
+	if info, ok := s.apiKeys.get(hash); ok {
+		return info, nil
 	}
+	var info apiKeyInfo
+	var hc, app, machine, hint string
+	err := s.pool.QueryRow(ctx, `SELECT disabled, rate_limit_per_sec, hc_username, app_name, machine, COALESCE(key_hint,'') FROM api_keys WHERE key_hash=$1`, hash).Scan(&info.disabled, &info.perSec, &hc, &app, &machine, &hint)
+	if err != nil {
+		return apiKeyInfo{}, err
+	}
+	info.display = formatKeyDisplay(hc, app, machine, hint)
+	s.apiKeys.put(hash, info)
+	return info, nil
 }
 
 func (s *Server) stats() map[string]any {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	// Get cumulative stats from system_stats table
-	var totalRequests, totalCached, todayRequests int64
+	// One round trip: this runs every second while the dashboard is open.
+	// GitHub exposes separate quotas by resource. Core covers normal REST API
+	// traffic, so keep it separate from search and GraphQL's smaller pools.
+	// Once a recorded window has elapsed, estimate that token as refilled.
+	var totalRequests, totalCached, todayRequests, activeDonated int64
+	var coreRateLimit, coreRateRemaining, coreRateTracked int64
+	var coreRateReset, coreRateUpdatedAt *time.Time
 	_ = s.pool.QueryRow(ctx, `
-		SELECT total_requests, total_cached_requests, today_requests 
-		FROM system_stats WHERE id = 1
-	`).Scan(&totalRequests, &totalCached, &todayRequests)
+		SELECT COALESCE(ss.total_requests, 0), COALESCE(ss.total_cached_requests, 0), COALESCE(ss.today_requests, 0),
+		       (SELECT count(*) FROM donated_tokens WHERE revoked = false),
+		       core.rate_limit, core.remaining, core.tracked, core.next_reset, core.oldest_update
+		FROM (
+			SELECT COALESCE(SUM(tr.rate_limit), 0)::bigint AS rate_limit,
+			       COALESCE(SUM(CASE WHEN tr.reset <= now() THEN tr.rate_limit ELSE tr.remaining END), 0)::bigint AS remaining,
+			       COUNT(*)::bigint AS tracked,
+			       MIN(tr.reset) FILTER (WHERE tr.reset > now()) AS next_reset,
+			       MIN(tr.updated_at) AS oldest_update
+			FROM token_rate_limits tr
+			JOIN donated_tokens dt ON dt.id = tr.token_id
+			WHERE dt.revoked = false AND tr.category = 'core'
+		) core
+		LEFT JOIN system_stats ss ON ss.id = 1
+	`).Scan(&totalRequests, &totalCached, &todayRequests, &activeDonated,
+		&coreRateLimit, &coreRateRemaining, &coreRateTracked, &coreRateReset, &coreRateUpdatedAt)
 
 	// Calculate cache hit rate from cumulative stats
 	var hitPct float64
 	if totalRequests > 0 {
 		hitPct = float64(totalCached) * 100.0 / float64(totalRequests)
 	}
-
-	var activeDonated int64
-	_ = s.pool.QueryRow(ctx, `SELECT count(*) FROM donated_tokens WHERE revoked=false`).Scan(&activeDonated)
-
-	// GitHub exposes separate quotas by resource. Core covers normal REST API
-	// traffic, so keep it separate from search and GraphQL's smaller pools.
-	// Once a recorded window has elapsed, estimate that token as refilled.
-	var coreRateLimit, coreRateRemaining, coreRateTracked int64
-	var coreRateReset, coreRateUpdatedAt *time.Time
-	_ = s.pool.QueryRow(ctx, `
-		SELECT COALESCE(SUM(tr.rate_limit), 0)::bigint,
-		       COALESCE(SUM(CASE WHEN tr.reset <= now() THEN tr.rate_limit ELSE tr.remaining END), 0)::bigint,
-		       COUNT(*)::bigint,
-		       MIN(tr.reset) FILTER (WHERE tr.reset > now()),
-		       MIN(tr.updated_at)
-		FROM token_rate_limits tr
-		JOIN donated_tokens dt ON dt.id = tr.token_id
-		WHERE dt.revoked = false AND tr.category = 'core'
-	`).Scan(&coreRateLimit, &coreRateRemaining, &coreRateTracked, &coreRateReset, &coreRateUpdatedAt)
 
 	var coreRateResetUnix, coreRateUpdatedUnix int64
 	if coreRateReset != nil {
@@ -999,10 +982,6 @@ func (h *wsHub) run() {
 	}
 }
 
-func (h *wsHub) broadcastStat(m map[string]any) {
-	b, _ := json.Marshal(map[string]any{"type": "stats", "data": m})
-	h.broadcast <- b
-}
 func (h *wsHub) broadcastRecent(v any) {
 	b, _ := json.Marshal(map[string]any{"type": "recent", "data": v})
 	h.broadcast <- b

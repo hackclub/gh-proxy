@@ -58,4 +58,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpServer.Shutdown(ctx)
+	if err := srv.Close(ctx); err != nil {
+		log.Printf("flush on shutdown: %v", err)
+	}
 }

@@ -35,7 +35,14 @@ DB_MAX_IDLE_CONNS=5
 DB_CONN_MAX_LIFETIME=1800  # 30 minutes
 ```
 
-Each proxied request acquires a connection about three times: the API key lookup, the cache read or write, and one batched write for logs and counters. None of these acquires overlap, so a small pool goes a long way. Locally, a 10-connection pool served ~3,600 cache-hit RPS at 200 concurrent clients.
+A cache hit needs one database query: the cache read. Everything else stays off the request path:
+
+- **API keys** are kept in memory for 30 seconds after a lookup. Disabling a key applies at once on the instance that handled it, and within 30 seconds everywhere else.
+- **Request logs and usage counters** (`request_logs`, `system_stats`, `request_stats_hourly`, `api_keys` totals) are summed in memory and written in one batch per second. A crash loses at most about a second of counts; a clean shutdown flushes them.
+- **Donated token quotas** come from GitHub's `X-RateLimit-*` response headers and are written in one batch per second. `/rate_limit` is only called when a response has no such headers.
+- **Admin dashboard stats** are one query per second, only while someone has the dashboard open, and only pushed when they change.
+
+Locally, a 10-connection pool served ~13,800 cache-hit RPS at 200 concurrent clients (p99 24ms).
 
 ### 2. Rate Limiter Optimization (Critical)
 
