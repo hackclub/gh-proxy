@@ -18,7 +18,7 @@ import (
 func main() {
 	cfg := config.Load()
 
-	pool, err := db.Connect(context.Background(), cfg.DatabaseURL)
+	pool, err := db.Connect(context.Background(), cfg)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
 	}
@@ -49,6 +49,7 @@ func main() {
 
 	// start background jobs
 	go srv.LogsJanitor()
+	go db.MonitorPool(context.Background(), pool, time.Minute)
 
 	// graceful shutdown
 	quit := make(chan os.Signal, 1)

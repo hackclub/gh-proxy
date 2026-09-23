@@ -48,10 +48,10 @@ func Load() Config {
 		GithubClientSecret: os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"),
 		MaxCacheTime:       timeDuration{Seconds: maxCacheTime},
 		MaxCacheSizeMB:     maxCacheSize,
-		DBMaxConns:         parseInt32(getenv("DB_MAX_CONNS", "150")),
-		DBMaxIdleConns:     parseInt32(getenv("DB_MAX_IDLE_CONNS", "50")),
-		DBConnMaxLifetime:  parseInt32(getenv("DB_CONN_MAX_LIFETIME", "1800")),  // 30 minutes
-		MaxProxyBodyBytes:  parseInt(getenv("MAX_PROXY_BODY_BYTES", "1048576")), // 1MB
+		DBMaxConns:        parseInt32(getenv("DB_MAX_CONNS", "20")),
+		DBMaxIdleConns:    parseInt32(getenv("DB_MAX_IDLE_CONNS", "2")),        // pgxpool MinConns
+		DBConnMaxLifetime: parseInt32(getenv("DB_CONN_MAX_LIFETIME", "1800")),  // 30 minutes
+		MaxProxyBodyBytes: parseInt(getenv("MAX_PROXY_BODY_BYTES", "1048576")), // 1MB
 	}
 	if cfg.GithubClientID == "" || cfg.GithubClientSecret == "" {
 		log.Println("warning: GitHub OAuth env vars not set; donating tokens won't work")

@@ -18,15 +18,24 @@ For 500 RPS, the main bottlenecks are:
 
 ### 1. Database Connection Pool (Critical)
 
-**Current**: 20 connections  
-**Recommended for 500 RPS**: 100-200 connections
+**Default**: 20 connections per instance
+
+> ⚠️ Size this against the database, not the target RPS. Every instance can open
+> up to `DB_MAX_CONNS`, and during a rolling deploy old and new instances run
+> side by side. Keep `instances × DB_MAX_CONNS × 2` under Postgres
+> `max_connections − superuser_reserved_connections` (97 on a 100-connection
+> server). Past that, Postgres rejects new connections with "too many clients".
+> Requests beyond the pool size wait in the pool, and the server logs
+> `db pool: N acquires waited` when that happens.
 
 ```bash
 # Add to .env
-DB_MAX_CONNS=150
-DB_MAX_IDLE_CONNS=50
+DB_MAX_CONNS=30
+DB_MAX_IDLE_CONNS=5
 DB_CONN_MAX_LIFETIME=1800  # 30 minutes
 ```
+
+Each proxied request acquires a connection about three times: the API key lookup, the cache read or write, and one batched write for logs and counters. None of these acquires overlap, so a small pool goes a long way. Locally, a 10-connection pool served ~3,600 cache-hit RPS at 200 concurrent clients.
 
 ### 2. Rate Limiter Optimization (Critical)
 
@@ -61,11 +70,11 @@ MAX_CACHE_TIME=900         # 15 minutes
 
 ### Critical Optimizations Applied
 
-#### 1. Database Connection Pool (5x increase)
+#### 1. Database Connection Pool
 ```env
-DB_MAX_CONNS=150              # Was: 20 → Now: 150
-DB_MAX_IDLE_CONNS=50          # New: Minimum idle connections  
-DB_CONN_MAX_LIFETIME=1800     # New: 30 minute connection lifetime
+DB_MAX_CONNS=30               # Per instance; see the sizing note above
+DB_MAX_IDLE_CONNS=5           # Minimum open connections (pgxpool MinConns)
+DB_CONN_MAX_LIFETIME=1800     # 30 minute connection lifetime
 ```
 
 #### 2. Rate Limiter Sharding (16x concurrency)
@@ -100,8 +109,8 @@ Timeout: 15s                   # Was: 30s → 50% faster
 ### Recommended Production Settings
 ```env
 # Copy .env.performance for these optimized settings:
-DB_MAX_CONNS=150
-DB_MAX_IDLE_CONNS=50
+DB_MAX_CONNS=30
+DB_MAX_IDLE_CONNS=5
 MAX_CACHE_SIZE_MB=1000        # 1GB cache for better hit rates
 MAX_CACHE_TIME=900            # 15 minutes
 MAX_PROXY_BODY_BYTES=262144   # 256KB (reduces memory pressure)

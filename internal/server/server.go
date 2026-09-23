@@ -48,6 +48,8 @@ type Server struct {
 	cacheHits atomic.Int64
 	hub       *wsHub
 	tmpl      *template.Template
+	// unix nanos of the last websocket stats push
+	lastStatsAt atomic.Int64
 	// rate limiting
 	ratelimit *rateLimiter
 }
@@ -339,8 +341,9 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 	// rate limit and disabled check
 	var disabled bool
 	var perSec int
+	var hc, app, machine, hint string
 	apiKeyHash := sha256Hex(apiKey)
-	err := s.pool.QueryRow(r.Context(), `SELECT disabled, rate_limit_per_sec FROM api_keys WHERE key_hash=$1`, apiKeyHash).Scan(&disabled, &perSec)
+	err := s.pool.QueryRow(r.Context(), `SELECT disabled, rate_limit_per_sec, hc_username, app_name, machine, COALESCE(key_hint,'') FROM api_keys WHERE key_hash=$1`, apiKeyHash).Scan(&disabled, &perSec, &hc, &app, &machine, &hint)
 	if errors.Is(err, pgx.ErrNoRows) {
 		log.Printf("deny unknown key: %s", maskKey(apiKey))
 		setRateLimitHeaders(w.Header(), defaultRateLimitState())
@@ -358,6 +361,7 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 		s.jsonError(w, "API_KEY_DISABLED", "API key disabled", "Contact an administrator to re-enable your key", 403)
 		return
 	}
+	display := formatKeyDisplay(hc, app, machine, hint)
 	allowed, rlState := s.ratelimit.Allow(apiKeyHash, perSec)
 	if !allowed {
 		log.Printf("429 rate limit for key %s", maskKey(apiKey))
@@ -390,18 +394,16 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 			w.Header().Set("X-Gh-Proxy-Cache", "hit")
 			w.Header().Set("X-Gh-Proxy-Category", ghCategory(fullTarget))
 			setRateLimitHeaders(w.Header(), rlState)
-			if disp := s.lookupClientDisplay(r.Context(), apiKeyHash); disp != "" {
-				w.Header().Set("X-Gh-Proxy-Client", disp)
-			}
+			w.Header().Set("X-Gh-Proxy-Client", display)
 			w.WriteHeader(status)
 			_, _ = w.Write(cached)
-			s.afterRequest(r.Context(), apiKeyHash, r.Method, r.URL.Path, status, true)
+			s.afterRequest(r.Context(), apiKeyHash, display, r.Method, r.URL.Path, status, true)
 			return
 		}
 	}
 
 	// Fetch from GitHub and cache
-	status, hdr, respBody, usedToken, err := s.gh.Do(r.Context(), r.Method, fullTarget, body)
+	status, hdr, respBody, donor, err := s.gh.Do(r.Context(), r.Method, fullTarget, body)
 	if err != nil {
 		log.Println("proxy error:", err)
 	}
@@ -411,7 +413,7 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 	if status == 0 {
 		setRateLimitHeaders(w.Header(), rlState)
 		s.jsonError(w, "UPSTREAM_ERROR", "Could not reach the GitHub API", "The proxy could not complete the upstream request; retry with backoff", http.StatusBadGateway)
-		s.afterRequest(r.Context(), apiKeyHash, r.Method, r.URL.Path, http.StatusBadGateway, false)
+		s.afterRequest(r.Context(), apiKeyHash, display, r.Method, r.URL.Path, http.StatusBadGateway, false)
 		return
 	}
 	// Cache successful, cacheable responses (GitHub API responses are safe to cache even if private)
@@ -428,39 +430,51 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 	w.Header().Set("X-Gh-Proxy-Cache", "miss")
 	w.Header().Set("X-Gh-Proxy-Category", ghCategory(fullTarget))
 	setRateLimitHeaders(w.Header(), rlState)
-	if disp := s.lookupClientDisplay(r.Context(), apiKeyHash); disp != "" {
-		w.Header().Set("X-Gh-Proxy-Client", disp)
-	}
-	if usedToken != "" {
-		var user string
-		_ = s.pool.QueryRow(r.Context(), `SELECT github_user FROM donated_tokens WHERE id::text=$1`, usedToken).Scan(&user)
-		if user != "" {
-			w.Header().Set("X-Gh-Proxy-Donor", user)
-		}
+	w.Header().Set("X-Gh-Proxy-Client", display)
+	if donor != "" {
+		w.Header().Set("X-Gh-Proxy-Donor", donor)
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(respBody)
 
-	s.afterRequest(r.Context(), apiKeyHash, r.Method, r.URL.Path, status, false)
+	s.afterRequest(r.Context(), apiKeyHash, display, r.Method, r.URL.Path, status, false)
 }
 
-func (s *Server) afterRequest(ctx context.Context, apiKeyHash, method, path string, status int, hit bool) {
+func (s *Server) afterRequest(ctx context.Context, apiKeyHash, display, method, path string, status int, hit bool) {
 	if hit {
 		s.cacheHits.Add(1)
 	}
 	s.totalReq.Add(1)
 	s.logRequest(ctx, apiKeyHash, method, path, status, hit)
 	log.Printf("%s %s -> %d (%s)", method, path, status, map[bool]string{true: "cache", false: "origin"}[hit])
-	s.hub.broadcastRecent(map[string]any{"method": method, "path": path, "created_at": time.Now(), "display": s.lookupClientDisplay(ctx, apiKeyHash)})
+	s.hub.broadcastRecent(map[string]any{"method": method, "path": path, "created_at": time.Now(), "display": display})
+	s.maybeBroadcastStats()
+}
+
+// maybeBroadcastStats pushes dashboard stats to websocket viewers at most once
+// per second, and not at all when nobody is watching; stats() runs several
+// aggregate queries, so doing it per request multiplies DB load.
+func (s *Server) maybeBroadcastStats() {
+	if s.hub.clientCount.Load() == 0 {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := s.lastStatsAt.Load()
+	if now-last < int64(time.Second) || !s.lastStatsAt.CompareAndSwap(last, now) {
+		return
+	}
 	s.hub.broadcastStat(s.stats())
 }
 
+// logRequest records the request and bumps every counter in one batch: a
+// single pool acquire and round trip instead of one per statement.
 func (s *Server) logRequest(ctx context.Context, apiKeyHash, method, path string, status int, hit bool) {
-	_, _ = s.pool.Exec(ctx, `INSERT INTO request_logs(api_key,method,path,status,cache_hit) VALUES($1,$2,$3,$4,$5)`, apiKeyHash, method, path, status, hit)
+	batch := &pgx.Batch{}
+	batch.Queue(`INSERT INTO request_logs(api_key,method,path,status,cache_hit) VALUES($1,$2,$3,$4,$5)`, apiKeyHash, method, path, status, hit)
 
 	// Update cumulative stats - system level
-	s.updateSystemStats(ctx, hit)
-	_, _ = s.pool.Exec(ctx, `
+	queueSystemStats(batch, hit)
+	batch.Queue(`
 		INSERT INTO request_stats_hourly (hour, requests)
 		VALUES (date_trunc('hour', now()), 1)
 		ON CONFLICT (hour) DO UPDATE SET requests = request_stats_hourly.requests + 1
@@ -468,10 +482,11 @@ func (s *Server) logRequest(ctx context.Context, apiKeyHash, method, path string
 
 	// Update cumulative stats - per API key level
 	if hit {
-		_, _ = s.pool.Exec(ctx, `UPDATE api_keys SET last_used_at=now(), total_requests=total_requests+1, total_cached_requests=total_cached_requests+1 WHERE key_hash=$1`, apiKeyHash)
+		batch.Queue(`UPDATE api_keys SET last_used_at=now(), total_requests=total_requests+1, total_cached_requests=total_cached_requests+1 WHERE key_hash=$1`, apiKeyHash)
 	} else {
-		_, _ = s.pool.Exec(ctx, `UPDATE api_keys SET last_used_at=now(), total_requests=total_requests+1 WHERE key_hash=$1`, apiKeyHash)
+		batch.Queue(`UPDATE api_keys SET last_used_at=now(), total_requests=total_requests+1 WHERE key_hash=$1`, apiKeyHash)
 	}
+	_ = s.pool.SendBatch(ctx, batch).Close()
 }
 
 // prune request_logs to keep only latest N rows periodically (avoid doing it on hot path)
@@ -487,15 +502,15 @@ func (s *Server) LogsJanitor() {
 	}
 }
 
-// updateSystemStats increments system-wide cumulative counters and handles daily reset
-func (s *Server) updateSystemStats(ctx context.Context, hit bool) {
+// queueSystemStats increments system-wide cumulative counters and handles daily reset
+func queueSystemStats(batch *pgx.Batch, hit bool) {
 	// Use NYC Eastern Time for daily reset as requested
 	loc, _ := time.LoadLocation("America/New_York")
 	currentDate := time.Now().In(loc).Format("2006-01-02")
 
 	if hit {
 		// Increment both total requests and cached requests
-		_, _ = s.pool.Exec(ctx, `
+		batch.Queue(`
 			INSERT INTO system_stats (id, total_requests, total_cached_requests, today_requests, today_date) 
 			VALUES (1, 1, 1, 1, $1::date)
 			ON CONFLICT (id) DO UPDATE SET
@@ -510,7 +525,7 @@ func (s *Server) updateSystemStats(ctx context.Context, hit bool) {
 		`, currentDate)
 	} else {
 		// Increment only total requests
-		_, _ = s.pool.Exec(ctx, `
+		batch.Queue(`
 			INSERT INTO system_stats (id, total_requests, total_cached_requests, today_requests, today_date) 
 			VALUES (1, 1, 0, 1, $1::date)
 			ON CONFLICT (id) DO UPDATE SET
@@ -526,7 +541,8 @@ func (s *Server) updateSystemStats(ctx context.Context, hit bool) {
 }
 
 func (s *Server) stats() map[string]any {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 
 	// Get cumulative stats from system_stats table
 	var totalRequests, totalCached, todayRequests int64
@@ -681,15 +697,6 @@ func formatKeyDisplay(hc, app, machine, hint string) string {
 	return base + "_" + hint
 }
 
-// lookup display from api_keys by hash
-func (s *Server) lookupClientDisplay(ctx context.Context, keyHash string) string {
-	var hc, app, machine, h string
-	if err := s.pool.QueryRow(ctx, `SELECT hc_username, app_name, machine, COALESCE(key_hint,'') FROM api_keys WHERE key_hash=$1`, keyHash).Scan(&hc, &app, &machine, &h); err == nil {
-		return formatKeyDisplay(hc, app, machine, h)
-	}
-	return ""
-}
-
 func parseAPIKey(v string) string { return strings.TrimSpace(v) }
 
 func sha256Hex(s string) string {
@@ -721,10 +728,11 @@ func randString(n int) string {
 // WebSocket hub
 
 type wsHub struct {
-	clients    map[*wsClient]bool
-	broadcast  chan []byte
-	register   chan *wsClient
-	unregister chan *wsClient
+	clients     map[*wsClient]bool
+	clientCount atomic.Int32 // mirrors len(clients) for readers outside run()
+	broadcast   chan []byte
+	register    chan *wsClient
+	unregister  chan *wsClient
 }
 
 // request logger middleware
@@ -987,6 +995,7 @@ func (h *wsHub) run() {
 				}
 			}
 		}
+		h.clientCount.Store(int32(len(h.clients)))
 	}
 }
 
