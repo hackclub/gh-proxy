@@ -9,14 +9,15 @@
     body { font-family: -apple-system, system-ui, sans-serif; margin: 1rem; }
     table { border-collapse: collapse; width: 100%; }
     th, td { border-bottom: 1px solid #eee; padding: 8px; text-align: left; }
-    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem }
+    .grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 1rem }
     .card { border: 1px solid #eee; border-radius: 8px; padding: 1rem }
+    .card-wide { grid-column: span 2 }
     .muted { color: #666 }
     .rate-limit { margin-top: 1rem; }
     .rate-limit progress { width: 100%; height: 0.75rem; accent-color: #238636; }
     .rate-limit-summary { display: flex; justify-content: space-between; gap: 0.5rem; margin-top: 0.35rem; font-size: 0.8rem; }
-    @media (max-width: 800px) { .grid { grid-template-columns: repeat(2, 1fr); } }
-    @media (max-width: 480px) { .grid { grid-template-columns: 1fr; } }
+    @media (max-width: 1000px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 480px) { .grid { grid-template-columns: 1fr; } .card-wide { grid-column: auto; } }
     .nav-link { display: inline-block; margin-right: 1rem; padding: 0.5rem 1rem; background: #f0f0f0; color: #333; text-decoration: none; border-radius: 4px; font-size: 0.9rem; }
     .nav-link:hover { background: #e0e0e0; }
   </style>
@@ -31,7 +32,8 @@
     <div class="card"><div>Total requests</div><h2 id="totalRequests">{{.totalRequests}}</h2></div>
     <div class="card"><div>Cache hit rate</div><h2 id="cacheHitRate">{{.cacheHitRate}}</h2></div>
     <div class="card"><div>Today's requests</div><h2 id="today">{{.today}}</h2></div>
-    <div class="card">
+    <div class="card"><div>Avg latency (24h)</div><h2 id="avgLatency">{{.avgLatency}}</h2></div>
+    <div class="card card-wide">
       <div>Active donated tokens</div><h2 id="activeTokens">{{.activeTokens}}</h2>
       <div class="rate-limit">
         <div>Estimated core API capacity</div>
@@ -103,6 +105,7 @@ ws.onmessage = (ev) => {
     document.getElementById('totalRequests').textContent = s.totalRequests;
     document.getElementById('cacheHitRate').textContent = s.cacheHitRate;
     document.getElementById('today').textContent = s.today;
+    document.getElementById('avgLatency').textContent = s.avgLatency;
     document.getElementById('activeTokens').textContent = s.activeTokens;
     updateCoreRate(s);
     refreshAPIKeys();

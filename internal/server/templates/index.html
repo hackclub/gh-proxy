@@ -16,7 +16,7 @@
       .donate-container { max-width: 720px; width: 100%; }
       h1 { font-size: 2rem; margin-bottom: 1rem; }
       .stats-box { background: #f7f7f8; border: 1px solid #eee; border-radius: 12px; padding: 1rem; margin: 1rem 0; }
-      .request-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; margin-top: 1rem; }
+      .request-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem; margin-top: 1rem; }
       .request-stat { background: #fff; border: 1px solid #e5e5e5; border-radius: 8px; padding: 0.75rem; }
       .request-stat strong { display: block; font-size: 1.4rem; }
       .request-stat span { color: #666; font-size: 0.85rem; }
@@ -41,6 +41,7 @@
         <div class="request-stat"><strong>{{.TotalRequests}}</strong><span>requests processed in total</span></div>
         <div class="request-stat"><strong>{{.Requests7Days}}</strong><span>{{.Requests7DaysLabel}}</span></div>
         <div class="request-stat"><strong>{{.Requests24Hours}}</strong><span>{{.Requests24HoursLabel}}</span></div>
+        <div class="request-stat"><strong>{{.AvgLatency}}</strong><span>average response time in the past 24 hours</span></div>
       </div>
   </div>
 

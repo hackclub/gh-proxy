@@ -166,7 +166,7 @@ func (s *Server) basicAuth(next http.Handler) http.Handler {
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	var donors int
-	var totalRequests, requests7Days, requests24Hours int64
+	var totalRequests, requests7Days, requests24Hours, latencyUs24Hours, latencySamples24Hours int64
 	var lastUser, lastURL, lastAgo string
 	var lastAt *time.Time
 	statsTrackingStartedAt := time.Now()
@@ -177,9 +177,11 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 			COALESCE((SELECT total_requests FROM system_stats WHERE id = 1), 0),
 			COALESCE(SUM(requests) FILTER (WHERE hour >= date_trunc('hour', now()) - interval '167 hours'), 0),
 			COALESCE(SUM(requests) FILTER (WHERE hour >= date_trunc('hour', now()) - interval '23 hours'), 0),
+			COALESCE(SUM(latency_us_sum) FILTER (WHERE hour >= date_trunc('hour', now()) - interval '23 hours'), 0),
+			COALESCE(SUM(latency_samples) FILTER (WHERE hour >= date_trunc('hour', now()) - interval '23 hours'), 0),
 			COALESCE((SELECT stats_tracking_started_at FROM system_stats WHERE id = 1), now())
 		FROM request_stats_hourly
-	`).Scan(&totalRequests, &requests7Days, &requests24Hours, &statsTrackingStartedAt)
+	`).Scan(&totalRequests, &requests7Days, &requests24Hours, &latencyUs24Hours, &latencySamples24Hours, &statsTrackingStartedAt)
 	if lastUser != "" {
 		lastURL = "https://github.com/" + lastUser
 	}
@@ -204,6 +206,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"Requests7DaysLabel":   requests7DaysLabel,
 		"Requests24Hours":      formatNumber(requests24Hours),
 		"Requests24HoursLabel": requests24HoursLabel,
+		"AvgLatency":           formatLatency(latencyUs24Hours, latencySamples24Hours),
 	}
 	s.render(w, "index.html", data)
 }
@@ -232,6 +235,25 @@ func formatNumber(n int64) string {
 		s = s[:i] + "," + s[i:]
 	}
 	return s
+}
+
+// formatLatency renders an average response time from a microsecond sum and
+// sample count, e.g. "0.84 ms", "12.3 ms", "240 ms" or "1.52 s".
+func formatLatency(sumUs, samples int64) string {
+	if samples <= 0 {
+		return "—"
+	}
+	ms := float64(sumUs) / float64(samples) / 1000
+	switch {
+	case ms < 1:
+		return fmt.Sprintf("%.2f ms", ms)
+	case ms < 100:
+		return fmt.Sprintf("%.1f ms", ms)
+	case ms < 1000:
+		return fmt.Sprintf("%.0f ms", ms)
+	default:
+		return fmt.Sprintf("%.2f s", ms/1000)
+	}
 }
 
 func humanizeDuration(d time.Duration) string {
@@ -352,6 +374,7 @@ func (s *Server) handleProxyGraphQL(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target string) {
+	start := time.Now()
 	apiKey := parseAPIKey(r.Header.Get("X-API-Key"))
 	if apiKey == "" {
 		setRateLimitHeaders(w.Header(), defaultRateLimitState())
@@ -414,7 +437,7 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 			w.Header().Set("X-Gh-Proxy-Client", display)
 			w.WriteHeader(status)
 			_, _ = w.Write(cached)
-			s.afterRequest(r.Context(), apiKeyHash, display, r.Method, r.URL.Path, status, true)
+			s.afterRequest(r.Context(), start, apiKeyHash, display, r.Method, r.URL.Path, status, true)
 			return
 		}
 	}
@@ -430,7 +453,7 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 	if status == 0 {
 		setRateLimitHeaders(w.Header(), rlState)
 		s.jsonError(w, "UPSTREAM_ERROR", "Could not reach the GitHub API", "The proxy could not complete the upstream request; retry with backoff", http.StatusBadGateway)
-		s.afterRequest(r.Context(), apiKeyHash, display, r.Method, r.URL.Path, http.StatusBadGateway, false)
+		s.afterRequest(r.Context(), start, apiKeyHash, display, r.Method, r.URL.Path, http.StatusBadGateway, false)
 		return
 	}
 	// Cache successful, cacheable responses (GitHub API responses are safe to cache even if private)
@@ -454,15 +477,17 @@ func (s *Server) serveProxy(w http.ResponseWriter, r *http.Request, target strin
 	w.WriteHeader(status)
 	_, _ = w.Write(respBody)
 
-	s.afterRequest(r.Context(), apiKeyHash, display, r.Method, r.URL.Path, status, false)
+	s.afterRequest(r.Context(), start, apiKeyHash, display, r.Method, r.URL.Path, status, false)
 }
 
-func (s *Server) afterRequest(ctx context.Context, apiKeyHash, display, method, path string, status int, hit bool) {
+// afterRequest runs once the response has been written; start is when the
+// proxy handler received the request.
+func (s *Server) afterRequest(ctx context.Context, start time.Time, apiKeyHash, display, method, path string, status int, hit bool) {
 	if hit {
 		s.cacheHits.Add(1)
 	}
 	s.totalReq.Add(1)
-	s.usage.record(apiKeyHash, method, path, status, hit)
+	s.usage.record(apiKeyHash, method, path, status, hit, time.Since(start))
 	log.Printf("%s %s -> %d (%s)", method, path, status, map[bool]string{true: "cache", false: "origin"}[hit])
 	s.hub.broadcastRecent(map[string]any{"method": method, "path": path, "created_at": time.Now(), "display": display})
 }
@@ -535,10 +560,12 @@ func (s *Server) stats() map[string]any {
 	var totalRequests, totalCached, todayRequests, activeDonated int64
 	var coreRateLimit, coreRateRemaining, coreRateTracked int64
 	var coreRateReset, coreRateUpdatedAt *time.Time
+	var latencyUs, latencySamples int64
 	_ = s.pool.QueryRow(ctx, `
 		SELECT COALESCE(ss.total_requests, 0), COALESCE(ss.total_cached_requests, 0), COALESCE(ss.today_requests, 0),
 		       (SELECT count(*) FROM donated_tokens WHERE revoked = false),
-		       core.rate_limit, core.remaining, core.tracked, core.next_reset, core.oldest_update
+		       core.rate_limit, core.remaining, core.tracked, core.next_reset, core.oldest_update,
+		       latency.us_sum, latency.samples
 		FROM (
 			SELECT COALESCE(SUM(tr.rate_limit), 0)::bigint AS rate_limit,
 			       COALESCE(SUM(CASE WHEN tr.reset <= now() THEN tr.rate_limit ELSE tr.remaining END), 0)::bigint AS remaining,
@@ -549,9 +576,15 @@ func (s *Server) stats() map[string]any {
 			JOIN donated_tokens dt ON dt.id = tr.token_id
 			WHERE dt.revoked = false AND tr.category = 'core'
 		) core
+		CROSS JOIN (
+			SELECT COALESCE(SUM(latency_us_sum), 0)::bigint AS us_sum, COALESCE(SUM(latency_samples), 0)::bigint AS samples
+			FROM request_stats_hourly
+			WHERE hour >= date_trunc('hour', now()) - interval '23 hours'
+		) latency
 		LEFT JOIN system_stats ss ON ss.id = 1
 	`).Scan(&totalRequests, &totalCached, &todayRequests, &activeDonated,
-		&coreRateLimit, &coreRateRemaining, &coreRateTracked, &coreRateReset, &coreRateUpdatedAt)
+		&coreRateLimit, &coreRateRemaining, &coreRateTracked, &coreRateReset, &coreRateUpdatedAt,
+		&latencyUs, &latencySamples)
 
 	// Calculate cache hit rate from cumulative stats
 	var hitPct float64
@@ -572,6 +605,7 @@ func (s *Server) stats() map[string]any {
 		"cacheHitRate":        fmt.Sprintf("%.1f%%", hitPct),
 		"today":               todayRequests,
 		"activeTokens":        activeDonated,
+		"avgLatency":          formatLatency(latencyUs, latencySamples),
 		"coreRateLimit":       coreRateLimit,
 		"coreRateRemaining":   coreRateRemaining,
 		"coreRateTracked":     coreRateTracked,

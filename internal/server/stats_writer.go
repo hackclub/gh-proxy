@@ -28,9 +28,9 @@ type statsWriter struct {
 
 type statsDelta struct {
 	logs    []logRow
-	days    map[string]*reqCount // America/New_York date -> counts
-	minutes map[time.Time]int64  // request minute -> count, bucketed by hour in SQL
-	keys    map[string]*keyUsage // api key hash -> usage
+	days    map[string]*reqCount       // America/New_York date -> counts
+	minutes map[time.Time]*minuteCount // request minute -> counts, bucketed by hour in SQL
+	keys    map[string]*keyUsage       // api key hash -> usage
 }
 
 type logRow struct {
@@ -41,6 +41,8 @@ type logRow struct {
 }
 
 type reqCount struct{ total, cached int64 }
+
+type minuteCount struct{ requests, latencyUs int64 }
 
 type keyUsage struct {
 	total, cached int64
@@ -59,13 +61,13 @@ func newStatsWriter(pool *pgxpool.Pool) *statsWriter {
 func newStatsDelta() statsDelta {
 	return statsDelta{
 		days:    make(map[string]*reqCount),
-		minutes: make(map[time.Time]int64),
+		minutes: make(map[time.Time]*minuteCount),
 		keys:    make(map[string]*keyUsage),
 	}
 }
 
 // record adds one request to the pending batch; it never touches the database.
-func (w *statsWriter) record(apiKeyHash, method, path string, status int, hit bool) {
+func (w *statsWriter) record(apiKeyHash, method, path string, status int, hit bool, latency time.Duration) {
 	now := time.Now()
 	day := now.In(w.loc).Format("2006-01-02")
 	w.mu.Lock()
@@ -81,7 +83,14 @@ func (w *statsWriter) record(apiKeyHash, method, path string, status int, hit bo
 	c.total++
 	// Minutes rather than hours so Postgres's date_trunc('hour') stays exact
 	// in time zones with half-hour offsets.
-	d.minutes[now.Truncate(time.Minute)]++
+	minute := now.Truncate(time.Minute)
+	m := d.minutes[minute]
+	if m == nil {
+		m = &minuteCount{}
+		d.minutes[minute] = m
+	}
+	m.requests++
+	m.latencyUs += latency.Microseconds()
 	k := d.keys[apiKeyHash]
 	if k == nil {
 		k = &keyUsage{}
@@ -156,8 +165,13 @@ func (d *statsDelta) merge(newer statsDelta) {
 			d.days[day] = c
 		}
 	}
-	for m, n := range newer.minutes {
-		d.minutes[m] += n
+	for minute, m := range newer.minutes {
+		if cur := d.minutes[minute]; cur != nil {
+			cur.requests += m.requests
+			cur.latencyUs += m.latencyUs
+		} else {
+			d.minutes[minute] = m
+		}
 	}
 	for hash, k := range newer.keys {
 		if cur := d.keys[hash]; cur != nil {
@@ -221,16 +235,21 @@ func (d *statsDelta) batch() *pgx.Batch {
 	if len(d.minutes) > 0 {
 		mins := make([]time.Time, 0, len(d.minutes))
 		counts := make([]int64, 0, len(d.minutes))
-		for m, n := range d.minutes {
-			mins = append(mins, m)
-			counts = append(counts, n)
+		latencies := make([]int64, 0, len(d.minutes))
+		for minute, m := range d.minutes {
+			mins = append(mins, minute)
+			counts = append(counts, m.requests)
+			latencies = append(latencies, m.latencyUs)
 		}
 		b.Queue(`
-			INSERT INTO request_stats_hourly (hour, requests)
-			SELECT date_trunc('hour', m), SUM(n) FROM unnest($1::timestamptz[], $2::bigint[]) AS v(m, n)
+			INSERT INTO request_stats_hourly (hour, requests, latency_us_sum, latency_samples)
+			SELECT date_trunc('hour', m), SUM(n), SUM(l), SUM(n) FROM unnest($1::timestamptz[], $2::bigint[], $3::bigint[]) AS v(m, n, l)
 			GROUP BY 1
-			ON CONFLICT (hour) DO UPDATE SET requests = request_stats_hourly.requests + EXCLUDED.requests
-		`, mins, counts)
+			ON CONFLICT (hour) DO UPDATE SET
+				requests = request_stats_hourly.requests + EXCLUDED.requests,
+				latency_us_sum = request_stats_hourly.latency_us_sum + EXCLUDED.latency_us_sum,
+				latency_samples = request_stats_hourly.latency_samples + EXCLUDED.latency_samples
+		`, mins, counts, latencies)
 	}
 
 	if len(d.keys) > 0 {
