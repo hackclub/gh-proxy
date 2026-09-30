@@ -92,6 +92,9 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	defer conn.Release()
 	defer func() {
+		if conn.Conn().PgConn().TxStatus() == 'I' {
+			return
+		}
 		rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_, _ = conn.Exec(rollbackCtx, "ROLLBACK")
