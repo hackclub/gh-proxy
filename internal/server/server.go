@@ -139,7 +139,9 @@ func (s *Server) wrapMiddleware(h http.Handler) http.Handler {
 func (s *Server) cacheJanitor() {
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		_ = s.cache.Cleanup(ctx)
+		if err := s.cache.Cleanup(ctx); err != nil {
+			log.Printf("cache cleanup failed: %v", err)
+		}
 		cancel()
 		time.Sleep(1 * time.Minute)
 	}

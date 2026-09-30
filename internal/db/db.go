@@ -85,18 +85,29 @@ func MonitorPool(ctx context.Context, pool *pgxpool.Pool, every time.Duration) {
 }
 
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
+	// Pin one connection so explicit migration transactions cannot span pool connections.
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	defer func() {
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(rollbackCtx, "ROLLBACK")
+	}()
 	// very simple migration runner: apply files in lexical order, idempotently
 	entries, err := migrationsFS.ReadDir("migrations")
 	if err != nil {
 		return err
 	}
-	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (name text primary key)`); err != nil {
+	if _, err := conn.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (name text primary key)`); err != nil {
 		return err
 	}
 	for _, e := range entries {
 		name := e.Name()
 		var exists bool
-		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name=$1)`, name).Scan(&exists); err != nil {
+		if err := conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name=$1)`, name).Scan(&exists); err != nil {
 			return err
 		}
 		if exists {
@@ -117,11 +128,11 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 			if s == "" {
 				continue
 			}
-			if _, err := pool.Exec(ctx, s); err != nil {
+			if _, err := conn.Exec(ctx, s); err != nil {
 				return fmt.Errorf("migration %s: %w", name, err)
 			}
 		}
-		if _, err := pool.Exec(ctx, `INSERT INTO schema_migrations(name) VALUES($1)`, name); err != nil {
+		if _, err := conn.Exec(ctx, `INSERT INTO schema_migrations(name) VALUES($1)`, name); err != nil {
 			return err
 		}
 		log.Printf("migration applied: %s", name)
