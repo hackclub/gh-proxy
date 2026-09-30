@@ -158,18 +158,11 @@ func TestCacheOlderWaitingPutCannotOverwrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Release()
-	waits := pool.Stat().EmptyAcquireCount()
 	done := make(chan error, 1)
 	go func() { done <- New(pool, 60, 0).Put(ctx, "POST", "/race", nil, 200, []byte(`{}`), []byte("old")) }()
-	for pool.Stat().EmptyAcquireCount() == waits {
-		select {
-		case err := <-done:
-			t.Fatalf("Put did not wait: %v", err)
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
-		case <-time.After(time.Millisecond):
-		}
-	}
+	// EmptyAcquireCount advances only after acquisition finishes. Hold the sole
+	// connection while the older Put starts, then write through another pool.
+	time.Sleep(50 * time.Millisecond)
 	other, err := pgxpool.NewWithConfig(ctx, pool.Config())
 	if err != nil {
 		t.Fatal(err)

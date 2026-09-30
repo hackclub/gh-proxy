@@ -3,11 +3,12 @@ package cache
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
+	"errors"
 	"log"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -32,7 +33,7 @@ func (c *Cache) Get(ctx context.Context, method, url string, body []byte) (statu
 	row := c.pool.QueryRow(ctx, `SELECT status, resp_headers, resp_body FROM cached_responses WHERE method=$1 AND url=$2 AND content_hash=$3 AND (expires_at IS NULL OR expires_at > now()) ORDER BY id DESC LIMIT 1`, method, url, contentHash)
 	err = row.Scan(&status, &headers, &resp)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, nil, nil, false, nil
 		}
 		return
