@@ -1,7 +1,7 @@
 version: "3.9"
 services:
   db:
-    image: postgres:18-alpine
+    image: postgres:19-alpine
     environment:
       POSTGRES_USER: ghproxy
       POSTGRES_PASSWORD: ghproxy
